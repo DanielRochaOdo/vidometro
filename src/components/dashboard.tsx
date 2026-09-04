@@ -262,10 +262,6 @@ export function Dashboard() {
     ? Math.max(0, Math.floor(Math.min(...allChartValues) / 1000) * 1000)
     : 0;
 
-  const singleDayDot = preset === "1"
-    ? { r: 4, fill: "var(--chart-surface)", strokeWidth: 2 }
-    : false;
-
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -508,7 +504,7 @@ export function Dashboard() {
                         name="Dependentes"
                         stroke="var(--blue)"
                         strokeWidth={2.2}
-                        dot={singleDayDot ? { ...singleDayDot, stroke: "var(--blue)" } : false}
+                        dot={preset === "1" ? { r: 4, fill: "var(--chart-surface)", stroke: "var(--blue)", strokeWidth: 2 } : false}
                       />
                       <Line
                         type="monotone"
@@ -516,7 +512,7 @@ export function Dashboard() {
                         name="Titulares"
                         stroke="var(--cyan)"
                         strokeWidth={2.2}
-                        dot={singleDayDot ? { ...singleDayDot, stroke: "var(--cyan)" } : false}
+                        dot={preset === "1" ? { r: 4, fill: "var(--chart-surface)", stroke: "var(--cyan)", strokeWidth: 2 } : false}
                       />
                     </LineChart>
                   </ResponsiveContainer>
