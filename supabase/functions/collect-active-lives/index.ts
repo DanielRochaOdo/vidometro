@@ -12,6 +12,11 @@ type ApiSnapshot = {
   dataConsulta: string;
 };
 
+type RequestPayload = {
+  source?: string;
+  force?: boolean;
+};
+
 function jsonResponse(status: number, body: unknown) {
   return new Response(JSON.stringify(body), {
     status,
@@ -146,6 +151,9 @@ Deno.serve(async (request) => {
   try {
     assertAuthorized(request);
 
+    const requestPayload = await request.json().catch(() => ({})) as RequestPayload;
+    const forceCollection = requestPayload.force === true;
+
     const supabase = createClient(requiredEnv("SUPABASE_URL"), adminKey(), {
       auth: { persistSession: false, autoRefreshToken: false }
     });
@@ -159,7 +167,7 @@ Deno.serve(async (request) => {
 
     if (latestError) throw latestError;
 
-    if (latest) {
+    if (!forceCollection && latest) {
       const ageMs = Date.now() - new Date(latest.collected_at).getTime();
       if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs < MIN_COLLECTION_GAP_MS) {
         return jsonResponse(200, {
@@ -254,6 +262,8 @@ Deno.serve(async (request) => {
     return jsonResponse(200, {
       success: true,
       collected: true,
+      forced: forceCollection,
+      source: requestPayload.source ?? "unknown",
       data: {
         totalVidasAtivas: stored.total_active_lives,
         totalTitularesAtivos: stored.total_active_holders,
