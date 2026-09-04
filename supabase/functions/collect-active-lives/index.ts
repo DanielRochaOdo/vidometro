@@ -54,7 +54,9 @@ function secretKeys() {
 
 function assertAuthorized(request: Request) {
   const apiKey = request.headers.get("apikey")?.trim();
-  if (!apiKey || !secretKeys().has(apiKey)) {
+  const expected = Deno.env.get("VIDOMETRO_COLLECTOR_SECRET")?.trim();
+
+  if (!apiKey || !expected || apiKey !== expected) {
     throw new Error("UNAUTHORIZED");
   }
 }
