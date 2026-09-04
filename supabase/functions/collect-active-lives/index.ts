@@ -1,6 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const MIN_COLLECTION_GAP_MS = 4 * 60 * 1000 + 30 * 1000;
+const REALTIME_RETENTION_MS = 48 * 60 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const API_PATH = "/v2/api/contratos/vidasAtivas";
 
@@ -27,40 +28,6 @@ function requiredEnv(name: string) {
   return value;
 }
 
-function secretKeys() {
-  const keys = new Set<string>();
-  const configured = Deno.env.get("SUPABASE_SECRET_KEYS")?.trim();
-
-  if (configured) {
-    try {
-      const parsed = JSON.parse(configured) as Record<string, string>;
-      Object.values(parsed).forEach((value) => {
-        if (typeof value === "string" && value.trim()) keys.add(value.trim());
-      });
-    } catch {
-      throw new Error("SUPABASE_SECRET_KEYS possui formato inválido.");
-    }
-  }
-
-  const legacy = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")?.trim();
-  if (legacy) keys.add(legacy);
-
-  if (!keys.size) {
-    throw new Error("Nenhuma Secret Key do Supabase disponível na Edge Function.");
-  }
-
-  return keys;
-}
-
-function assertAuthorized(request: Request) {
-  const apiKey = request.headers.get("apikey")?.trim();
-  const expected = Deno.env.get("VIDOMETRO_COLLECTOR_SECRET")?.trim();
-
-  if (!apiKey || !expected || apiKey !== expected) {
-    throw new Error("UNAUTHORIZED");
-  }
-}
-
 function adminKey() {
   const configured = Deno.env.get("SUPABASE_SECRET_KEYS")?.trim();
   if (configured) {
@@ -70,6 +37,15 @@ function adminKey() {
   }
 
   return requiredEnv("SUPABASE_SERVICE_ROLE_KEY");
+}
+
+function assertAuthorized(request: Request) {
+  const apiKey = request.headers.get("apikey")?.trim();
+  const expected = Deno.env.get("VIDOMETRO_COLLECTOR_SECRET")?.trim();
+
+  if (!apiKey || !expected || apiKey !== expected) {
+    throw new Error("UNAUTHORIZED");
+  }
 }
 
 function resolveApiUrl() {
@@ -174,8 +150,6 @@ Deno.serve(async (request) => {
       auth: { persistSession: false, autoRefreshToken: false }
     });
 
-    // Protege a API Odontoart contra chamadas repetidas fora da cadência do cron.
-    // Isso não cria registros extras: a tabela continua tendo uma única linha por dia.
     const { data: latest, error: latestError } = await supabase
       .from("active_lives_snapshots")
       .select("total_active_lives,total_active_holders,total_active_dependents,consulted_at,collected_at")
@@ -230,8 +204,7 @@ Deno.serve(async (request) => {
     const collectedAt = new Date().toISOString();
     const collectionDate = fortalezaDate(snapshot.dataConsulta);
 
-    // Uma única linha por dia: cada leitura substitui os valores daquele dia.
-    // Ao final do dia, a linha representa exatamente a última leitura realizada.
+    // Histórico: uma única linha por dia, sempre substituída pela leitura mais recente.
     const { data: stored, error: insertError } = await supabase
       .from("active_lives_snapshots")
       .upsert(
@@ -249,6 +222,34 @@ Deno.serve(async (request) => {
       .single();
 
     if (insertError) throw insertError;
+
+    // Realtime: preserva cada ciclo da janela operacional para o gráfico e deltas entre ciclos.
+    // A janela é curta e não altera a regra do histórico diário consolidado.
+    const { error: realtimeError } = await supabase
+      .from("active_lives_realtime_samples")
+      .upsert(
+        {
+          collection_date: collectionDate,
+          total_active_lives: snapshot.totalVidasAtivas,
+          total_active_holders: snapshot.totalTitularesAtivos,
+          total_active_dependents: snapshot.totalDependentesAtivos,
+          consulted_at: snapshot.dataConsulta,
+          collected_at: collectedAt
+        },
+        { onConflict: "consulted_at" }
+      );
+
+    if (realtimeError) throw realtimeError;
+
+    const retentionCutoff = new Date(Date.now() - REALTIME_RETENTION_MS).toISOString();
+    const { error: cleanupError } = await supabase
+      .from("active_lives_realtime_samples")
+      .delete()
+      .lt("collected_at", retentionCutoff);
+
+    if (cleanupError) {
+      console.warn("Vidometro realtime cleanup:", cleanupError.message);
+    }
 
     return jsonResponse(200, {
       success: true,
