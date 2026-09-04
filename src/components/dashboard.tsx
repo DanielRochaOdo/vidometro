@@ -44,6 +44,8 @@ type SavedPreferences = { preset?: Preset; from?: string; to?: string };
 
 const PREFERENCES_KEY = "vidometro-dashboard-preferences";
 const VALID_PRESETS = new Set<Preset>(["realtime", "1", "7", "30", "90", "custom"]);
+const MANUAL_REFRESH_POLL_MS = 1000;
+const MANUAL_REFRESH_TIMEOUT_MS = 30_000;
 const numberFormatter = new Intl.NumberFormat("pt-BR");
 const dateTimeFormatter = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Fortaleza", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 const dateFormatter = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Fortaleza", day: "2-digit", month: "2-digit", year: "numeric" });
@@ -60,6 +62,10 @@ function shiftIsoDate(value: string, days: number) {
   const date = new Date(`${value}T12:00:00Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function isIsoDate(value?: string) { return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value)); }
@@ -90,8 +96,8 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
 
-  async function loadTelemetry(mode: Preset, nextFrom: string, nextTo: string, quiet = false) {
-    if (!nextFrom || !nextTo) return;
+  async function loadTelemetry(mode: Preset, nextFrom: string, nextTo: string, quiet = false): Promise<DashboardPayload | null> {
+    if (!nextFrom || !nextTo) return null;
     if (!quiet) setLoading(true);
     setError(null);
     try {
@@ -100,9 +106,12 @@ export function Dashboard() {
         ? await supabase.rpc("vidometro_realtime")
         : await supabase.rpc("vidometro_dashboard", { p_from: nextFrom, p_to: nextTo });
       if (result.error) throw result.error;
-      setData(result.data as DashboardPayload);
+      const nextData = result.data as DashboardPayload;
+      setData(nextData);
+      return nextData;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Não foi possível carregar o Vidômetro.");
+      return null;
     } finally {
       if (!quiet) setLoading(false);
     }
@@ -165,10 +174,10 @@ export function Dashboard() {
   useEffect(() => {
     if (!preferencesReady || !from || !to) return;
     const supabase = getSupabaseClient();
+    const refresh = () => { void loadTelemetry(preset, from, to, true); };
     const channel = supabase.channel(`vidometro-active-lives-${preset}-${from}-${to}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "active_lives_realtime_samples" }, () => {
-        void loadTelemetry(preset, from, to, true);
-      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "active_lives_snapshots" }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "active_lives_realtime_samples" }, refresh)
       .subscribe();
     return () => { void supabase.removeChannel(channel); };
   }, [preferencesReady, preset, from, to]);
@@ -181,10 +190,42 @@ export function Dashboard() {
   }
 
   async function refreshNow() {
-    if (!from || !to) return;
+    if (!from || !to || refreshing) return;
+
+    const baselineCollectedAt = data?.latest?.collectedAt ?? null;
     setRefreshing(true);
-    await loadTelemetry(preset, from, to, true);
-    setRefreshing(false);
+    setError(null);
+
+    try {
+      const supabase = getSupabaseClient();
+      const { data: requestId, error: refreshError } = await supabase.rpc("request_vidometro_refresh");
+      if (refreshError) throw refreshError;
+
+      // Quando outro clique acabou de solicitar uma coleta, ainda sincronizamos o painel
+      // imediatamente com o que estiver disponível no banco.
+      if (requestId == null) {
+        await loadTelemetry(preset, from, to, true);
+        return;
+      }
+
+      // pg_net dispara a Edge Function de forma assíncrona. O Realtime normalmente atualiza
+      // a UI assim que a gravação ocorre; este polling é um fallback para garantir que os
+      // números apareçam sem F5 mesmo se o websocket estiver indisponível.
+      const deadline = Date.now() + MANUAL_REFRESH_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        await wait(MANUAL_REFRESH_POLL_MS);
+        const refreshed = await loadTelemetry(preset, from, to, true);
+        const nextCollectedAt = refreshed?.latest?.collectedAt ?? null;
+        if (nextCollectedAt && nextCollectedAt !== baselineCollectedAt) return;
+      }
+
+      await loadTelemetry(preset, from, to, true);
+      setError("A consulta foi solicitada, mas a resposta demorou além do esperado. O painel continuará sincronizando automaticamente.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível solicitar a consulta imediata.");
+    } finally {
+      setRefreshing(false);
+    }
   }
 
   function changePreset(value: Preset) {
@@ -215,8 +256,8 @@ export function Dashboard() {
 
       <main className="dashboard-main" id="inicio"><div className="dashboard-container">
         {error && <div className="error-banner" role="alert"><span className="material-symbols-outlined" aria-hidden="true">warning</span><span>{error}</span></div>}
-        <section className="hero-section" aria-labelledby="hero-title"><div className="hero-copy"><div className="hero-kicker-row"><span className="telemetry-chip"><i /> Odontoart Online</span><span className="production-label">Telemetria em Produção</span></div><div><h1 id="hero-title">Vidas ativas,<br /><em>em tempo real.</em></h1><p>Acompanhe a quantidade de vidas ativas do plano Odontoart de forma simples, visual e atualizada.</p></div><div className="sync-card"><div className="sync-info"><span className="sync-icon material-symbols-outlined" aria-hidden="true">schedule</span><span><small>Última consulta da API</small><strong>{formatDateTime(latest?.dataConsulta)}</strong></span></div><button className="refresh-button" type="button" onClick={refreshNow} disabled={refreshing}><span className={`material-symbols-outlined ${refreshing ? "spin" : ""}`} aria-hidden="true">sync</span>{refreshing ? "Atualizando..." : "Atualizar painel"}</button></div></div>
-        <article className="hero-metric-card"><div className="hero-glow" aria-hidden="true" /><div className="hero-metric-header"><div className="metric-title-group"><span className="metric-icon-large material-symbols-outlined" aria-hidden="true">groups</span><span><small>Métrica Consolidada</small><strong>Vidas Ativas</strong></span></div><MetricDelta growth={growth?.totalVidasAtivas} /></div><div className="hero-number-block"><strong>{loading && !latest ? "—" : numberFormatter.format(totalLives)}</strong><small><i /> {realtimeMode ? "variação em relação ao ciclo anterior" : "variação no período selecionado"}</small></div><div className="hero-metric-footer"><span><i /> Total Carteira Ativa</span><strong>{latest ? "100% elegíveis" : "Aguardando leitura"}</strong></div></article></section>
+        <section className="hero-section" aria-labelledby="hero-title"><div className="hero-copy"><div className="hero-kicker-row"><span className="telemetry-chip"><i /> Odontoart Online</span><span className="production-label">Telemetria em Produção</span></div><div><h1 id="hero-title">Vidas ativas,<br /><em>em tempo real.</em></h1><p>Acompanhe a quantidade de vidas ativas do plano Odontoart de forma simples, visual e atualizada.</p></div><div className="sync-card"><div className="sync-info"><span className="sync-icon material-symbols-outlined" aria-hidden="true">schedule</span><span><small>Última consulta da API</small><strong>{formatDateTime(latest?.dataConsulta)}</strong></span></div><button className="refresh-button" type="button" onClick={refreshNow} disabled={refreshing}><span className={`material-symbols-outlined ${refreshing ? "spin" : ""}`} aria-hidden="true">sync</span>{refreshing ? "Consultando API..." : "Atualizar painel"}</button></div></div>
+        <article className="hero-metric-card"><div className="hero-glow" aria-hidden="true" /><div className="hero-metric-header"><div className="metric-title-group"><span className="metric-icon-large" aria-hidden="true"><span className="material-symbols-outlined" style={{ display: "block", width: 30, height: 30, lineHeight: 1, fontSize: 30, textAlign: "center", transform: "translateY(1px)" }}>groups</span></span><span><small>Métrica Consolidada</small><strong>Vidas Ativas</strong></span></div><MetricDelta growth={growth?.totalVidasAtivas} /></div><div className="hero-number-block"><strong>{loading && !latest ? "—" : numberFormatter.format(totalLives)}</strong><small><i /> {realtimeMode ? "variação em relação ao ciclo anterior" : "variação no período selecionado"}</small></div><div className="hero-metric-footer"><span><i /> Total Carteira Ativa</span><strong>{latest ? "100% elegíveis" : "Aguardando leitura"}</strong></div></article></section>
 
         <section className="metric-strip" aria-label="Composição das vidas ativas"><article className="mini-card holders-card"><div className="mini-card-top"><span className="mini-card-label"><i className="material-symbols-outlined" aria-hidden="true">badge</i>Titulares ativos</span><MetricDelta growth={growth?.totalTitularesAtivos} /></div><div className="mini-card-value"><strong>{numberFormatter.format(holders)}</strong><small>{formatShare(holders, totalLives)}</small></div></article><article className="mini-card dependents-card"><div className="mini-card-top"><span className="mini-card-label"><i className="material-symbols-outlined" aria-hidden="true">family_restroom</i>Dependentes ativos</span><MetricDelta growth={growth?.totalDependentesAtivos} /></div><div className="mini-card-value"><strong>{numberFormatter.format(dependents)}</strong><small>{formatShare(dependents, totalLives)}</small></div></article><article className="mini-card date-card"><div className="mini-card-top"><span className="mini-card-label"><i className="material-symbols-outlined" aria-hidden="true">calendar_today</i>Data da consulta</span><span className="timezone-label">UTC-3</span></div><div className="mini-card-value date-value"><strong>{formatDateTime(latest?.dataConsulta)}</strong><small>horário de Fortaleza</small></div></article></section>
 
