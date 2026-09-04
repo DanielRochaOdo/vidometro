@@ -1,11 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  Area,
-  AreaChart,
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -13,9 +10,9 @@ import {
   XAxis,
   YAxis
 } from "recharts";
+import { getSupabaseClient } from "@/lib/supabase";
 
 type Snapshot = {
-  id: string;
   totalVidasAtivas: number;
   totalTitularesAtivos: number;
   totalDependentesAtivos: number;
@@ -23,312 +20,349 @@ type Snapshot = {
   collectedAt: string;
 };
 
-type Growth = { absolute: number; percentage: number | null };
-
-type DashboardData = {
-  latest: Snapshot | null;
-  period: {
-    from: string;
-    to: string;
-    first: Snapshot | null;
-    last: Snapshot | null;
-    growth: {
-      totalVidasAtivas: Growth;
-      totalTitularesAtivos: Growth;
-      totalDependentesAtivos: Growth;
-    };
-  };
-  trend: Snapshot[];
-  sampling: "hour" | "day";
-  collectionIntervalMinutes: number;
+type Growth = {
+  absolute: number;
+  percentage: number | null;
 };
 
-type Envelope<T> = { success: boolean; data?: T; error?: string };
+type DashboardPayload = {
+  sampling: "hour" | "day";
+  latest: Snapshot | null;
+  first: Snapshot | null;
+  last: Snapshot | null;
+  growth: {
+    totalVidasAtivas: Growth;
+    totalTitularesAtivos: Growth;
+    totalDependentesAtivos: Growth;
+  } | null;
+  trend: Snapshot[];
+  recent: Snapshot[];
+};
 
-const nf = new Intl.NumberFormat("pt-BR");
-const pf = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const numberFormatter = new Intl.NumberFormat("pt-BR");
+const dateTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
+  timeZone: "America/Fortaleza",
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit"
+});
+const shortDateFormatter = new Intl.DateTimeFormat("pt-BR", {
+  timeZone: "America/Fortaleza",
+  day: "2-digit",
+  month: "2-digit"
+});
 
-function todayFortaleza() {
-  return new Intl.DateTimeFormat("en-CA", {
+function fortalezaToday() {
+  const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Fortaleza",
     year: "numeric",
     month: "2-digit",
     day: "2-digit"
-  }).format(new Date());
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
-function shiftDate(date: string, delta: number) {
-  const [y, m, d] = date.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d + delta, 12)).toISOString().slice(0, 10);
+function shiftIsoDate(value: string, days: number) {
+  const date = new Date(`${value}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
-function dateTime(value?: string | null) {
+function formatDateTime(value?: string | null) {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("pt-BR", {
-    timeZone: "America/Fortaleza",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  }).format(new Date(value));
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : dateTimeFormatter.format(date);
 }
 
-function shortDate(value: string) {
-  const [y, m, d] = value.split("-");
-  return `${d}/${m}/${y}`;
+function formatPercent(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${value >= 0 ? "+" : ""}${value.toLocaleString("pt-BR", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1
+  })}%`;
 }
 
-async function envelope<T>(response: Response): Promise<T> {
-  const body = (await response.json().catch(() => null)) as Envelope<T> | null;
-  if (!response.ok || !body?.success || body.data === undefined) {
-    throw new Error(body?.error || "Não foi possível concluir a operação.");
-  }
-  return body.data;
-}
-
-function TrendPill({ growth }: { growth: Growth }) {
-  const positive = growth.absolute > 0;
-  const negative = growth.absolute < 0;
-  const sign = positive ? "+" : "";
-  const label = growth.percentage === null
-    ? `${sign}${nf.format(growth.absolute)}`
-    : `${sign}${nf.format(growth.absolute)} · ${sign}${pf.format(growth.percentage)}%`;
-  return <span className={`trend-pill ${positive ? "up" : negative ? "down" : "flat"}`}>{label}</span>;
-}
-
-function ThemeToggle() {
-  const [dark, setDark] = useState(false);
-  const [ready, setReady] = useState(false);
-
-  useEffect(() => {
-    const next = document.documentElement.dataset.theme === "dark";
-    setDark(next);
-    setReady(true);
-  }, []);
-
-  function toggle() {
-    const next = !dark;
-    document.documentElement.dataset.theme = next ? "dark" : "light";
-    localStorage.setItem("vidometro-theme", next ? "dark" : "light");
-    setDark(next);
-  }
-
+function GrowthBadge({ growth }: { growth?: Growth | null }) {
+  if (!growth || growth.percentage == null) return <span className="growth neutral">—</span>;
+  const kind = growth.percentage > 0 ? "positive" : growth.percentage < 0 ? "negative" : "neutral";
   return (
-    <button className="icon-button" onClick={toggle} type="button" aria-label="Alternar tema" title="Alternar tema">
-      {ready && dark ? "☀" : "◐"}
-    </button>
+    <span className={`growth ${kind}`}>
+      {growth.percentage > 0 ? "↑" : growth.percentage < 0 ? "↓" : "•"} {formatPercent(growth.percentage)}
+    </span>
   );
 }
 
-function MetricCard({ label, value, growth, note }: { label: string; value: number; growth?: Growth; note: string }) {
+function BarsIcon() {
   return (
-    <article className="metric-card">
-      <div className="metric-head">
-        <span className="eyebrow">{label}</span>
-        {growth ? <TrendPill growth={growth} /> : null}
-      </div>
-      <strong className="metric-value">{nf.format(value)}</strong>
-      <p>{note}</p>
-    </article>
+    <span className="brand-bars" aria-hidden="true">
+      <i />
+      <i />
+      <i />
+    </span>
   );
 }
 
 export function Dashboard() {
-  const [today] = useState(todayFortaleza);
-  const [draft, setDraft] = useState(() => ({ from: shiftDate(todayFortaleza(), -29), to: todayFortaleza() }));
-  const [range, setRange] = useState(draft);
-  const [data, setData] = useState<DashboardData | null>(null);
+  const today = useMemo(() => fortalezaToday(), []);
+  const initialFrom = useMemo(() => shiftIsoDate(today, -29), [today]);
+  const [from, setFrom] = useState(initialFrom);
+  const [to, setTo] = useState(today);
+  const [preset, setPreset] = useState("30");
+  const [data, setData] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
 
-  const load = useCallback(async () => {
-    const params = new URLSearchParams(range);
-    const response = await fetch(`/api/dashboard?${params}`, { cache: "no-store" });
-    setData(await envelope<DashboardData>(response));
-  }, [range]);
-
-  const refresh = useCallback(async (showSpinner = false) => {
-    if (showSpinner) setRefreshing(true);
+  async function loadDashboard(nextFrom = from, nextTo = to, quiet = false) {
+    if (!quiet) setLoading(true);
     setError(null);
+
     try {
-      await envelope(await fetch("/api/collect", { method: "POST" }));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Falha ao atualizar o Vidômetro.");
-      try { await load(); } catch { /* preserva erro de coleta */ }
+      const supabase = getSupabaseClient();
+      const { data: payload, error: rpcError } = await supabase.rpc("vidometro_dashboard", {
+        p_from: nextFrom,
+        p_to: nextTo
+      });
+      if (rpcError) throw rpcError;
+      setData(payload as DashboardPayload);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível carregar o Vidômetro.");
     } finally {
-      setLoading(false);
-      if (showSpinner) setRefreshing(false);
+      if (!quiet) setLoading(false);
     }
-  }, [load]);
-
-  useEffect(() => { void refresh(false); }, [refresh]);
-  useEffect(() => {
-    const id = window.setInterval(() => void refresh(false), 5 * 60 * 1000);
-    return () => window.clearInterval(id);
-  }, [refresh]);
-
-  const latest = data?.latest;
-  const growth = data?.period.growth;
-  const total = latest?.totalVidasAtivas ?? 0;
-  const holderShare = total ? ((latest?.totalTitularesAtivos ?? 0) / total) * 100 : 0;
-  const dependentShare = total ? ((latest?.totalDependentesAtivos ?? 0) / total) * 100 : 0;
-
-  const chartData = useMemo(() => (data?.trend ?? []).map((row) => ({
-    ...row,
-    label: new Intl.DateTimeFormat("pt-BR", {
-      timeZone: "America/Fortaleza",
-      day: "2-digit",
-      month: "2-digit",
-      ...(data?.sampling === "hour" ? { hour: "2-digit", minute: "2-digit" } : {})
-    }).format(new Date(row.dataConsulta))
-  })), [data]);
-
-  function applyRange() {
-    if (!draft.from || !draft.to || draft.from > draft.to) {
-      setError("Selecione um período válido.");
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    setRange(draft);
   }
 
+  useEffect(() => {
+    const saved = localStorage.getItem("vidometro-theme");
+    const resolved = saved === "light" ? "light" : "dark";
+    setTheme(resolved);
+    document.documentElement.dataset.theme = resolved;
+    void loadDashboard(initialFrom, today);
+
+    const interval = window.setInterval(() => {
+      void loadDashboard(from, to, true);
+    }, 5 * 60 * 1000);
+
+    return () => window.clearInterval(interval);
+    // O intervalo deve ser recriado quando o período mudar.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [from, to]);
+
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    localStorage.setItem("vidometro-theme", next);
+    document.documentElement.dataset.theme = next;
+  }
+
+  async function refreshNow() {
+    setRefreshing(true);
+    setError(null);
+    try {
+      const supabase = getSupabaseClient();
+      const { error: invokeError } = await supabase.functions.invoke("collect-active-lives", {
+        body: { source: "dashboard" }
+      });
+      if (invokeError) throw invokeError;
+      await loadDashboard(from, to, true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível atualizar agora.");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  function changePreset(value: string) {
+    setPreset(value);
+    if (value === "custom") return;
+    const days = Number(value);
+    const nextFrom = shiftIsoDate(today, -(days - 1));
+    setFrom(nextFrom);
+    setTo(today);
+    void loadDashboard(nextFrom, today);
+  }
+
+  const latest = data?.latest;
+  const growth = data?.growth;
+  const lastCollectedAt = latest ? new Date(latest.collectedAt).getTime() : 0;
+  const online = Boolean(lastCollectedAt && Date.now() - lastCollectedAt < 15 * 60 * 1000);
+
+  const chartData = (data?.trend ?? []).map((item) => ({
+    ...item,
+    label: shortDateFormatter.format(new Date(item.dataConsulta))
+  }));
+
+  const minLives = chartData.length
+    ? Math.floor(Math.min(...chartData.map((item) => item.totalVidasAtivas)) / 100) * 100
+    : 0;
+
   return (
-    <main className="page-shell">
-      <div className="ambient ambient-one" />
-      <div className="ambient ambient-two" />
-      <div className="dashboard-wrap">
-        <header className="topbar">
-          <div className="brand">
-            <div className="brand-mark">V</div>
-            <div>
-              <strong>VIDÔMETRO</strong>
-              <span>Odontoart Online</span>
-            </div>
-          </div>
-          <div className="top-actions">
-            <span className="live-badge"><i /> atualização a cada 5 min</span>
-            <ThemeToggle />
-          </div>
-        </header>
+    <main className="site-shell">
+      <header className="topbar">
+        <a className="brand" href="#inicio" aria-label="Vidômetro - início">
+          <BarsIcon />
+          <span>
+            <strong>Vidômetro</strong>
+            <small>Acompanhamento de Vidas Ativas</small>
+          </span>
+        </a>
 
-        <section className="hero-row">
-          <div>
-            <span className="section-kicker">PAINEL OPERACIONAL</span>
-            <h1>Vidas ativas em tempo real</h1>
-            <p>Acompanhe a base ativa da Odontoart, a composição de titulares e dependentes e a evolução em qualquer período.</p>
-          </div>
-          <button className="refresh-button" onClick={() => void refresh(true)} disabled={refreshing} type="button">
-            <span className={refreshing ? "spin" : ""}>↻</span>
-            {refreshing ? "Consultando..." : "Atualizar agora"}
+        <nav className="nav" aria-label="Navegação principal">
+          <a className="nav-active" href="#inicio">⌂ <span>Início</span></a>
+          <a href="#historico">⌁ <span>Histórico</span></a>
+          <a href="#sobre">ⓘ <span>Sobre</span></a>
+          <span className={`status ${online ? "online" : "waiting"}`}>
+            <i /> {online ? "Online" : "Aguardando"}
+          </span>
+          <button className="theme-button" type="button" onClick={toggleTheme} aria-label="Alternar tema">
+            {theme === "dark" ? "☀" : "☾"}
           </button>
-        </section>
+        </nav>
+      </header>
 
-        {error ? <div className="error-banner">{error}</div> : null}
+      <div className="content" id="inicio">
+        {error && <div className="error-banner">{error}</div>}
 
-        <section className="primary-grid">
-          <article className="total-card">
-            <div className="total-card-top">
-              <span className="eyebrow light">TOTAL DE VIDAS ATIVAS</span>
-              {growth ? <TrendPill growth={growth.totalVidasAtivas} /> : null}
+        <section className="hero-grid">
+          <div className="hero-copy">
+            <p className="eyebrow">Odontoart Online</p>
+            <h1>Vidas ativas,<br /><em>em tempo real.</em></h1>
+            <p className="hero-description">
+              Acompanhe a quantidade de vidas ativas do plano Odontoart de forma simples, visual e atualizada.
+            </p>
+
+            <div className="update-bar">
+              <span className="clock">◷</span>
+              <div>
+                <small>Última consulta da API</small>
+                <strong>{formatDateTime(latest?.dataConsulta)}</strong>
+              </div>
+              <button type="button" onClick={refreshNow} disabled={refreshing}>
+                <span className={refreshing ? "spin" : ""}>↻</span>
+                {refreshing ? "Atualizando..." : "Atualizar agora"}
+              </button>
             </div>
-            <div className="big-number">{loading && !latest ? "—" : nf.format(total)}</div>
-            <div className="consult-info">
-              <span>Data da consulta</span>
-              <strong>{dateTime(latest?.dataConsulta)}</strong>
+          </div>
+
+          <article className="primary-card">
+            <div className="people-icon" aria-hidden="true">♟♟</div>
+            <div className="primary-card-copy">
+              <span>Vidas Ativas</span>
+              <strong>{loading && !latest ? "—" : numberFormatter.format(latest?.totalVidasAtivas ?? 0)}</strong>
+              <GrowthBadge growth={growth?.totalVidasAtivas} />
+              <small>variação no período selecionado</small>
             </div>
-            <div className="card-glow" />
           </article>
-
-          <div className="side-metrics">
-            <MetricCard
-              label="Titulares ativos"
-              value={latest?.totalTitularesAtivos ?? 0}
-              growth={growth?.totalTitularesAtivos}
-              note={`${pf.format(holderShare)}% da base atual`}
-            />
-            <MetricCard
-              label="Dependentes ativos"
-              value={latest?.totalDependentesAtivos ?? 0}
-              growth={growth?.totalDependentesAtivos}
-              note={`${pf.format(dependentShare)}% da base atual`}
-            />
-          </div>
         </section>
 
-        <section className="period-panel">
-          <div className="period-copy">
-            <span className="section-kicker">CRESCIMENTO</span>
-            <h2>Variação no período</h2>
-            <p>Compara o primeiro e o último registro disponíveis dentro do intervalo escolhido.</p>
-          </div>
-          <div className="date-controls">
-            <label>De<input type="date" value={draft.from} max={draft.to} onChange={(e) => setDraft((v) => ({ ...v, from: e.target.value }))} /></label>
-            <label>Até<input type="date" value={draft.to} min={draft.from} max={today} onChange={(e) => setDraft((v) => ({ ...v, to: e.target.value }))} /></label>
-            <button type="button" onClick={applyRange}>Aplicar</button>
-          </div>
-
-          <div className="growth-grid">
-            <div><span>Vidas ativas</span>{growth ? <TrendPill growth={growth.totalVidasAtivas} /> : "—"}</div>
-            <div><span>Titulares</span>{growth ? <TrendPill growth={growth.totalTitularesAtivos} /> : "—"}</div>
-            <div><span>Dependentes</span>{growth ? <TrendPill growth={growth.totalDependentesAtivos} /> : "—"}</div>
-          </div>
-          <div className="period-foot">
-            {shortDate(range.from)} a {shortDate(range.to)}
-            {data?.period.first && data?.period.last
-              ? ` · ${nf.format(data.period.first.totalVidasAtivas)} → ${nf.format(data.period.last.totalVidasAtivas)} vidas`
-              : " · sem amostras suficientes no período"}
-          </div>
+        <section className="mini-metrics" aria-label="Composição das vidas ativas">
+          <article>
+            <span>Titulares ativos</span>
+            <strong>{numberFormatter.format(latest?.totalTitularesAtivos ?? 0)}</strong>
+            <GrowthBadge growth={growth?.totalTitularesAtivos} />
+          </article>
+          <article>
+            <span>Dependentes ativos</span>
+            <strong>{numberFormatter.format(latest?.totalDependentesAtivos ?? 0)}</strong>
+            <GrowthBadge growth={growth?.totalDependentesAtivos} />
+          </article>
+          <article>
+            <span>Data da consulta</span>
+            <strong className="date-metric">{formatDateTime(latest?.dataConsulta)}</strong>
+            <small>horário de Fortaleza</small>
+          </article>
         </section>
 
-        <section className="charts-grid">
-          <article className="chart-card">
-            <div className="chart-title"><div><span className="section-kicker">EVOLUÇÃO</span><h2>Total de vidas ativas</h2></div><span className="sample-chip">{data?.sampling === "hour" ? "por hora" : "por dia"}</span></div>
-            <div className="chart-area">
+        <section className="dashboard-grid" id="historico">
+          <article className="panel chart-panel">
+            <div className="panel-heading">
+              <div>
+                <h2><span>⌁</span> Evolução de Vidas Ativas</h2>
+                <small>Amostragem por {data?.sampling === "hour" ? "hora" : "dia"}</small>
+              </div>
+              <div className="period-controls">
+                <select value={preset} onChange={(event) => changePreset(event.target.value)} aria-label="Período">
+                  <option value="7">Últimos 7 dias</option>
+                  <option value="30">Últimos 30 dias</option>
+                  <option value="90">Últimos 90 dias</option>
+                  <option value="custom">Personalizado</option>
+                </select>
+                {preset === "custom" && (
+                  <div className="custom-dates">
+                    <input type="date" value={from} max={to} onChange={(event) => setFrom(event.target.value)} />
+                    <input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} />
+                    <button type="button" onClick={() => void loadDashboard(from, to)}>Aplicar</button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="chart-wrap">
               {chartData.length ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData} margin={{ top: 12, right: 10, left: -10, bottom: 0 }}>
-                    <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 5" vertical={false} />
-                    <XAxis dataKey="label" tick={{ fill: "var(--muted)", fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={25} />
-                    <YAxis tick={{ fill: "var(--muted)", fontSize: 11 }} tickLine={false} axisLine={false} domain={["auto", "auto"]} width={62} />
-                    <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 14 }} formatter={(value) => nf.format(Number(value ?? 0))} />
-                    <Line type="monotone" dataKey="totalVidasAtivas" name="Vidas ativas" stroke="#20d7ba" strokeWidth={3} dot={false} activeDot={{ r: 5 }} />
+                  <LineChart data={chartData} margin={{ top: 16, right: 18, left: 0, bottom: 0 }}>
+                    <CartesianGrid vertical stroke="var(--grid)" strokeDasharray="0" />
+                    <XAxis dataKey="label" tick={{ fill: "var(--muted)", fontSize: 12 }} tickLine={false} axisLine={{ stroke: "var(--grid)" }} minTickGap={24} />
+                    <YAxis domain={[minLives, "auto"]} tickFormatter={(value) => numberFormatter.format(value)} tick={{ fill: "var(--muted)", fontSize: 12 }} tickLine={false} axisLine={false} width={72} />
+                    <Tooltip
+                      contentStyle={{ background: "var(--tooltip)", border: "1px solid var(--border)", borderRadius: 12 }}
+                      labelStyle={{ color: "var(--text)" }}
+                      formatter={(value, name) => [numberFormatter.format(Number(value)), name]}
+                    />
+                    <Line type="monotone" dataKey="totalVidasAtivas" name="Vidas ativas" stroke="var(--green)" strokeWidth={3} dot={{ r: 3, fill: "var(--green)" }} activeDot={{ r: 5 }} />
+                    <Line type="monotone" dataKey="totalTitularesAtivos" name="Titulares" stroke="var(--blue)" strokeWidth={1.6} dot={false} opacity={0.8} />
+                    <Line type="monotone" dataKey="totalDependentesAtivos" name="Dependentes" stroke="var(--cyan)" strokeWidth={1.6} dot={false} opacity={0.7} />
                   </LineChart>
                 </ResponsiveContainer>
-              ) : <div className="empty-chart">As amostras aparecerão aqui após as primeiras coletas.</div>}
+              ) : (
+                <div className="empty-state">{loading ? "Carregando histórico..." : "Ainda não há amostras neste período."}</div>
+              )}
             </div>
           </article>
 
-          <article className="chart-card">
-            <div className="chart-title"><div><span className="section-kicker">COMPOSIÇÃO</span><h2>Titulares × dependentes</h2></div></div>
-            <div className="chart-area">
-              {chartData.length ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={chartData} margin={{ top: 12, right: 10, left: -10, bottom: 0 }}>
-                    <defs>
-                      <linearGradient id="holders" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#4ab8ff" stopOpacity={0.35}/><stop offset="100%" stopColor="#4ab8ff" stopOpacity={0.02}/></linearGradient>
-                      <linearGradient id="dependents" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#20d7ba" stopOpacity={0.35}/><stop offset="100%" stopColor="#20d7ba" stopOpacity={0.02}/></linearGradient>
-                    </defs>
-                    <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 5" vertical={false} />
-                    <XAxis dataKey="label" tick={{ fill: "var(--muted)", fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={25} />
-                    <YAxis tick={{ fill: "var(--muted)", fontSize: 11 }} tickLine={false} axisLine={false} domain={["auto", "auto"]} width={62} />
-                    <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 14 }} formatter={(value) => nf.format(Number(value ?? 0))} />
-                    <Legend />
-                    <Area type="monotone" dataKey="totalTitularesAtivos" name="Titulares" stroke="#4ab8ff" strokeWidth={2.5} fill="url(#holders)" />
-                    <Area type="monotone" dataKey="totalDependentesAtivos" name="Dependentes" stroke="#20d7ba" strokeWidth={2.5} fill="url(#dependents)" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              ) : <div className="empty-chart">Ainda não há histórico suficiente para este gráfico.</div>}
-            </div>
-          </article>
+          <aside className="side-column">
+            <article className="panel summary-panel">
+              <h2><BarsIcon /> Resumo</h2>
+              <dl>
+                <div><dt>Vidas Ativas (atual)</dt><dd>{numberFormatter.format(latest?.totalVidasAtivas ?? 0)}</dd></div>
+                <div><dt>Variação (período)</dt><dd className={growth?.totalVidasAtivas.percentage != null && growth.totalVidasAtivas.percentage < 0 ? "down" : "up"}>{formatPercent(growth?.totalVidasAtivas.percentage)}</dd></div>
+                <div><dt>Início do período</dt><dd>{numberFormatter.format(data?.first?.totalVidasAtivas ?? 0)}</dd></div>
+                <div><dt>Fim do período</dt><dd>{numberFormatter.format(data?.last?.totalVidasAtivas ?? 0)}</dd></div>
+                <div><dt>Amostras exibidas</dt><dd>{data?.trend.length ?? 0}</dd></div>
+              </dl>
+            </article>
+
+            <article className="panel recent-panel">
+              <h2><span>◷</span> Últimas atualizações</h2>
+              <div className="recent-list">
+                {(data?.recent ?? []).map((item, index) => {
+                  const previous = data?.recent[index + 1];
+                  const pct = previous?.totalVidasAtivas
+                    ? ((item.totalVidasAtivas - previous.totalVidasAtivas) / previous.totalVidasAtivas) * 100
+                    : null;
+                  return (
+                    <div className="recent-row" key={`${item.collectedAt}-${index}`}>
+                      <time>{formatDateTime(item.dataConsulta).replace(/\/\d{4},?\s?/, "")}</time>
+                      <strong>{numberFormatter.format(item.totalVidasAtivas)}</strong>
+                      <span className={pct != null && pct < 0 ? "down" : "up"}>{formatPercent(pct)}</span>
+                    </div>
+                  );
+                })}
+                {!data?.recent.length && <div className="empty-mini">Sem coletas ainda.</div>}
+              </div>
+            </article>
+          </aside>
         </section>
-
-        <footer>Último snapshot armazenado: {dateTime(latest?.collectedAt)}</footer>
       </div>
+
+      <footer id="sobre">
+        <div><strong>Vidômetro</strong><small>Dados atualizados automaticamente via Supabase</small></div>
+        <span>♥ <small>Menos burocracia. Mais saúde.</small></span>
+      </footer>
     </main>
   );
 }
