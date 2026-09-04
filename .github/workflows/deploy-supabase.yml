@@ -36,10 +36,10 @@ jobs:
           version: latest
 
       - name: Link production project
-        run: supabase link --project-ref "$SUPABASE_PROJECT_ID" --password "$SUPABASE_DB_PASSWORD"
+        run: supabase link --project-ref "$SUPABASE_PROJECT_ID"
 
       - name: Apply database migrations
-        run: supabase db push --linked
+        run: supabase db push
 
       - name: Deploy Edge Functions
-        run: supabase functions deploy --project-ref "$SUPABASE_PROJECT_ID" --use-api
+        run: supabase functions deploy --project-ref "$SUPABASE_PROJECT_ID"
