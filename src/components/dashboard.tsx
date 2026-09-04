@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -26,7 +26,7 @@ type Growth = {
 };
 
 type DashboardPayload = {
-  sampling: "hour" | "day";
+  sampling: "day";
   latest: Snapshot | null;
   first: Snapshot | null;
   last: Snapshot | null;
@@ -106,10 +106,9 @@ function BarsIcon() {
 }
 
 export function Dashboard() {
-  const today = useMemo(() => fortalezaToday(), []);
-  const initialFrom = useMemo(() => shiftIsoDate(today, -29), [today]);
-  const [from, setFrom] = useState(initialFrom);
-  const [to, setTo] = useState(today);
+  const [today, setToday] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
   const [preset, setPreset] = useState("30");
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -117,7 +116,8 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
 
-  async function loadDashboard(nextFrom = from, nextTo = to, quiet = false) {
+  async function loadDashboard(nextFrom: string, nextTo: string, quiet = false) {
+    if (!nextFrom || !nextTo) return;
     if (!quiet) setLoading(true);
     setError(null);
 
@@ -138,18 +138,24 @@ export function Dashboard() {
 
   useEffect(() => {
     const saved = localStorage.getItem("vidometro-theme");
-    const resolved = saved === "light" ? "light" : "dark";
-    setTheme(resolved);
-    document.documentElement.dataset.theme = resolved;
-    void loadDashboard(initialFrom, today);
+    const resolvedTheme = saved === "light" ? "light" : "dark";
+    setTheme(resolvedTheme);
+    document.documentElement.dataset.theme = resolvedTheme;
 
+    const resolvedToday = fortalezaToday();
+    const resolvedFrom = shiftIsoDate(resolvedToday, -29);
+    setToday(resolvedToday);
+    setFrom(resolvedFrom);
+    setTo(resolvedToday);
+    void loadDashboard(resolvedFrom, resolvedToday);
+  }, []);
+
+  useEffect(() => {
+    if (!from || !to) return;
     const interval = window.setInterval(() => {
       void loadDashboard(from, to, true);
     }, 5 * 60 * 1000);
-
     return () => window.clearInterval(interval);
-    // O intervalo deve ser recriado quando o período mudar.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [from, to]);
 
   function toggleTheme() {
@@ -160,25 +166,15 @@ export function Dashboard() {
   }
 
   async function refreshNow() {
+    if (!from || !to) return;
     setRefreshing(true);
-    setError(null);
-    try {
-      const supabase = getSupabaseClient();
-      const { error: invokeError } = await supabase.functions.invoke("collect-active-lives", {
-        body: { source: "dashboard" }
-      });
-      if (invokeError) throw invokeError;
-      await loadDashboard(from, to, true);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Não foi possível atualizar agora.");
-    } finally {
-      setRefreshing(false);
-    }
+    await loadDashboard(from, to, true);
+    setRefreshing(false);
   }
 
   function changePreset(value: string) {
     setPreset(value);
-    if (value === "custom") return;
+    if (value === "custom" || !today) return;
     const days = Number(value);
     const nextFrom = shiftIsoDate(today, -(days - 1));
     setFrom(nextFrom);
@@ -243,7 +239,7 @@ export function Dashboard() {
               </div>
               <button type="button" onClick={refreshNow} disabled={refreshing}>
                 <span className={refreshing ? "spin" : ""}>↻</span>
-                {refreshing ? "Atualizando..." : "Atualizar agora"}
+                {refreshing ? "Atualizando..." : "Atualizar painel"}
               </button>
             </div>
           </div>
@@ -282,7 +278,7 @@ export function Dashboard() {
             <div className="panel-heading">
               <div>
                 <h2><span>⌁</span> Evolução de Vidas Ativas</h2>
-                <small>Amostragem por {data?.sampling === "hour" ? "hora" : "dia"}</small>
+                <small>Uma amostra por dia · última leitura diária</small>
               </div>
               <div className="period-controls">
                 <select value={preset} onChange={(event) => changePreset(event.target.value)} aria-label="Período">
@@ -293,7 +289,7 @@ export function Dashboard() {
                 </select>
                 {preset === "custom" && (
                   <div className="custom-dates">
-                    <input type="date" value={from} max={to} onChange={(event) => setFrom(event.target.value)} />
+                    <input type="date" value={from} max={to || today} onChange={(event) => setFrom(event.target.value)} />
                     <input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} />
                     <button type="button" onClick={() => void loadDashboard(from, to)}>Aplicar</button>
                   </div>
@@ -332,12 +328,12 @@ export function Dashboard() {
                 <div><dt>Variação (período)</dt><dd className={growth?.totalVidasAtivas.percentage != null && growth.totalVidasAtivas.percentage < 0 ? "down" : "up"}>{formatPercent(growth?.totalVidasAtivas.percentage)}</dd></div>
                 <div><dt>Início do período</dt><dd>{numberFormatter.format(data?.first?.totalVidasAtivas ?? 0)}</dd></div>
                 <div><dt>Fim do período</dt><dd>{numberFormatter.format(data?.last?.totalVidasAtivas ?? 0)}</dd></div>
-                <div><dt>Amostras exibidas</dt><dd>{data?.trend.length ?? 0}</dd></div>
+                <div><dt>Dias com histórico</dt><dd>{data?.trend.length ?? 0}</dd></div>
               </dl>
             </article>
 
             <article className="panel recent-panel">
-              <h2><span>◷</span> Últimas atualizações</h2>
+              <h2><span>◷</span> Últimos dias</h2>
               <div className="recent-list">
                 {(data?.recent ?? []).map((item, index) => {
                   const previous = data?.recent[index + 1];
@@ -352,7 +348,7 @@ export function Dashboard() {
                     </div>
                   );
                 })}
-                {!data?.recent.length && <div className="empty-mini">Sem coletas ainda.</div>}
+                {!data?.recent.length && <div className="empty-mini">Sem histórico diário ainda.</div>}
               </div>
             </article>
           </aside>
