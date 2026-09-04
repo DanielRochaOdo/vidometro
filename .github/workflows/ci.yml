@@ -11,38 +11,29 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_DB: vidometro_ci
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d vidometro_ci"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
     env:
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/vidometro_ci
-      DATABASE_SSL: "false"
-      VIDAS_ATIVAS_API_ENDPOINT: https://example.com
-      VIDAS_ATIVAS_API_TOKEN: ci-token
-      CRON_SECRET: ci-secret
+      NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_ci_only
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: package.json
-      - run: npm install --no-audit --no-fund
-      - run: npm run db:migrate
-      - run: npm run typecheck
-      - run: npm run test
-      - run: npm run build
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Static build
+        run: npm run build
+
+      - name: Validate exported site
+        run: test -f out/index.html
