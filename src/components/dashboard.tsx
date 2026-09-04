@@ -48,6 +48,17 @@ const dateTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",
   minute: "2-digit"
 });
+const dateFormatter = new Intl.DateTimeFormat("pt-BR", {
+  timeZone: "America/Fortaleza",
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric"
+});
+const timeFormatter = new Intl.DateTimeFormat("pt-BR", {
+  timeZone: "America/Fortaleza",
+  hour: "2-digit",
+  minute: "2-digit"
+});
 const shortDateFormatter = new Intl.DateTimeFormat("pt-BR", {
   timeZone: "America/Fortaleza",
   day: "2-digit",
@@ -77,6 +88,18 @@ function formatDateTime(value?: string | null) {
   return Number.isNaN(date.getTime()) ? "—" : dateTimeFormatter.format(date);
 }
 
+function formatDate(value?: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : dateFormatter.format(date);
+}
+
+function formatTime(value?: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : timeFormatter.format(date);
+}
+
 function formatPercent(value?: number | null) {
   if (value == null || !Number.isFinite(value)) return "—";
   return `${value >= 0 ? "+" : ""}${value.toLocaleString("pt-BR", {
@@ -85,19 +108,30 @@ function formatPercent(value?: number | null) {
   })}%`;
 }
 
-function GrowthBadge({ growth }: { growth?: Growth | null }) {
-  if (!growth || growth.percentage == null) return <span className="growth neutral">—</span>;
-  const kind = growth.percentage > 0 ? "positive" : growth.percentage < 0 ? "negative" : "neutral";
+function formatShare(part: number, total: number) {
+  if (!total) return "—";
+  return `${((part / total) * 100).toLocaleString("pt-BR", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1
+  })}% do total`;
+}
+
+function MetricDelta({ growth }: { growth?: Growth | null }) {
+  const percentage = growth?.percentage;
+  const kind = percentage == null || percentage === 0 ? "neutral" : percentage > 0 ? "positive" : "negative";
+  const icon = percentage == null || percentage === 0 ? "remove" : percentage > 0 ? "arrow_upward" : "arrow_downward";
+
   return (
-    <span className={`growth ${kind}`}>
-      {growth.percentage > 0 ? "↑" : growth.percentage < 0 ? "↓" : "•"} {formatPercent(growth.percentage)}
+    <span className={`delta-chip ${kind}`}>
+      <span className="material-symbols-outlined" aria-hidden="true">{icon}</span>
+      {formatPercent(percentage)}
     </span>
   );
 }
 
-function BarsIcon() {
+function BrandMark() {
   return (
-    <span className="brand-bars" aria-hidden="true">
+    <span className="brand-mark" aria-hidden="true">
       <i />
       <i />
       <i />
@@ -184,6 +218,9 @@ export function Dashboard() {
 
   const latest = data?.latest;
   const growth = data?.growth;
+  const totalLives = latest?.totalVidasAtivas ?? 0;
+  const holders = latest?.totalTitularesAtivos ?? 0;
+  const dependents = latest?.totalDependentesAtivos ?? 0;
   const lastCollectedAt = latest ? new Date(latest.collectedAt).getTime() : 0;
   const online = Boolean(lastCollectedAt && Date.now() - lastCollectedAt < 15 * 60 * 1000);
 
@@ -192,173 +229,368 @@ export function Dashboard() {
     label: shortDateFormatter.format(new Date(item.dataConsulta))
   }));
 
-  const minLives = chartData.length
-    ? Math.floor(Math.min(...chartData.map((item) => item.totalVidasAtivas)) / 100) * 100
+  const allChartValues = chartData.flatMap((item) => [
+    item.totalVidasAtivas,
+    item.totalTitularesAtivos,
+    item.totalDependentesAtivos
+  ]);
+  const minLives = allChartValues.length
+    ? Math.max(0, Math.floor(Math.min(...allChartValues) / 1000) * 1000)
     : 0;
 
   return (
-    <main className="site-shell">
-      <header className="topbar">
-        <a className="brand" href="#inicio" aria-label="Vidômetro - início">
-          <BarsIcon />
-          <span>
-            <strong>Vidômetro</strong>
-            <small>Acompanhamento de Vidas Ativas</small>
-          </span>
-        </a>
+    <div className="app-shell">
+      <header className="app-header">
+        <div className="header-inner">
+          <div className="header-left">
+            <a className="brand" href="#inicio" aria-label="Vidômetro - início">
+              <BrandMark />
+              <span className="brand-copy">
+                <span className="brand-title-row">
+                  <strong>Vidômetro</strong>
+                  <em>Odontoart</em>
+                </span>
+                <small>Acompanhamento de Vidas Ativas</small>
+              </span>
+            </a>
 
-        <nav className="nav" aria-label="Navegação principal">
-          <a className="nav-active" href="#inicio">⌂ <span>Início</span></a>
-          <a href="#historico">⌁ <span>Histórico</span></a>
-          <a href="#sobre">ⓘ <span>Sobre</span></a>
-          <span className={`status ${online ? "online" : "waiting"}`}>
-            <i /> {online ? "Online" : "Aguardando"}
-          </span>
-          <button className="theme-button" type="button" onClick={toggleTheme} aria-label="Alternar tema">
-            {theme === "dark" ? "☀" : "☾"}
-          </button>
-        </nav>
-      </header>
-
-      <div className="content" id="inicio">
-        {error && <div className="error-banner">{error}</div>}
-
-        <section className="hero-grid">
-          <div className="hero-copy">
-            <p className="eyebrow">Odontoart Online</p>
-            <h1>Vidas ativas,<br /><em>em tempo real.</em></h1>
-            <p className="hero-description">
-              Acompanhe a quantidade de vidas ativas do plano Odontoart de forma simples, visual e atualizada.
-            </p>
-
-            <div className="update-bar">
-              <span className="clock">◷</span>
-              <div>
-                <small>Última consulta da API</small>
-                <strong>{formatDateTime(latest?.dataConsulta)}</strong>
-              </div>
-              <button type="button" onClick={refreshNow} disabled={refreshing}>
-                <span className={refreshing ? "spin" : ""}>↻</span>
-                {refreshing ? "Atualizando..." : "Atualizar painel"}
-              </button>
-            </div>
+            <nav className="main-nav" aria-label="Navegação principal">
+              <a className="active" href="#inicio">Início</a>
+              <a href="#historico">Histórico</a>
+              <a href="#sobre">Sobre</a>
+            </nav>
           </div>
 
-          <article className="primary-card">
-            <div className="people-icon" aria-hidden="true">♟♟</div>
-            <div className="primary-card-copy">
-              <span>Vidas Ativas</span>
-              <strong>{loading && !latest ? "—" : numberFormatter.format(latest?.totalVidasAtivas ?? 0)}</strong>
-              <GrowthBadge growth={growth?.totalVidasAtivas} />
-              <small>variação no período selecionado</small>
+          <div className="header-actions">
+            <span className={`live-pill ${online ? "online" : "waiting"}`}>
+              <i><b /></i>
+              {online ? "Online" : "Aguardando"}
+            </span>
+            <button className="icon-button" type="button" onClick={toggleTheme} aria-label="Alternar tema">
+              <span className="material-symbols-outlined" aria-hidden="true">{theme === "dark" ? "light_mode" : "dark_mode"}</span>
+            </button>
+            <span className="profile-chip" aria-hidden="true">
+              <span className="material-symbols-outlined">person</span>
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <main className="dashboard-main" id="inicio">
+        <div className="dashboard-container">
+          {error && (
+            <div className="error-banner" role="alert">
+              <span className="material-symbols-outlined" aria-hidden="true">warning</span>
+              <span>{error}</span>
             </div>
-          </article>
-        </section>
+          )}
 
-        <section className="mini-metrics" aria-label="Composição das vidas ativas">
-          <article>
-            <span>Titulares ativos</span>
-            <strong>{numberFormatter.format(latest?.totalTitularesAtivos ?? 0)}</strong>
-            <GrowthBadge growth={growth?.totalTitularesAtivos} />
-          </article>
-          <article>
-            <span>Dependentes ativos</span>
-            <strong>{numberFormatter.format(latest?.totalDependentesAtivos ?? 0)}</strong>
-            <GrowthBadge growth={growth?.totalDependentesAtivos} />
-          </article>
-          <article>
-            <span>Data da consulta</span>
-            <strong className="date-metric">{formatDateTime(latest?.dataConsulta)}</strong>
-            <small>horário de Fortaleza</small>
-          </article>
-        </section>
-
-        <section className="dashboard-grid" id="historico">
-          <article className="panel chart-panel">
-            <div className="panel-heading">
-              <div>
-                <h2><span>⌁</span> Evolução de Vidas Ativas</h2>
-                <small>Uma amostra por dia · última leitura diária</small>
+          <section className="hero-section" aria-labelledby="hero-title">
+            <div className="hero-copy">
+              <div className="hero-kicker-row">
+                <span className="telemetry-chip"><i /> Odontoart Online</span>
+                <span className="production-label">Telemetria em Produção</span>
               </div>
-              <div className="period-controls">
-                <select value={preset} onChange={(event) => changePreset(event.target.value)} aria-label="Período">
-                  <option value="7">Últimos 7 dias</option>
-                  <option value="30">Últimos 30 dias</option>
-                  <option value="90">Últimos 90 dias</option>
-                  <option value="custom">Personalizado</option>
-                </select>
-                {preset === "custom" && (
-                  <div className="custom-dates">
+
+              <div>
+                <h1 id="hero-title">Vidas ativas,<br /><em>em tempo real.</em></h1>
+                <p>
+                  Acompanhe a quantidade de vidas ativas do plano Odontoart de forma simples,
+                  visual e atualizada.
+                </p>
+              </div>
+
+              <div className="sync-card">
+                <div className="sync-info">
+                  <span className="sync-icon material-symbols-outlined" aria-hidden="true">schedule</span>
+                  <span>
+                    <small>Última consulta da API</small>
+                    <strong>{formatDateTime(latest?.dataConsulta)}</strong>
+                  </span>
+                </div>
+                <button className="refresh-button" type="button" onClick={refreshNow} disabled={refreshing}>
+                  <span className={`material-symbols-outlined ${refreshing ? "spin" : ""}`} aria-hidden="true">sync</span>
+                  {refreshing ? "Atualizando..." : "Atualizar painel"}
+                </button>
+              </div>
+            </div>
+
+            <article className="hero-metric-card">
+              <div className="hero-glow" aria-hidden="true" />
+              <div className="hero-metric-header">
+                <div className="metric-title-group">
+                  <span className="metric-icon-large material-symbols-outlined" aria-hidden="true">groups</span>
+                  <span>
+                    <small>Métrica Consolidada</small>
+                    <strong>Vidas Ativas</strong>
+                  </span>
+                </div>
+                <MetricDelta growth={growth?.totalVidasAtivas} />
+              </div>
+
+              <div className="hero-number-block">
+                <strong>{loading && !latest ? "—" : numberFormatter.format(totalLives)}</strong>
+                <small><i /> variação no período selecionado</small>
+              </div>
+
+              <div className="hero-metric-footer">
+                <span><i /> Total Carteira Ativa</span>
+                <strong>{latest ? "100% elegíveis" : "Aguardando leitura"}</strong>
+              </div>
+            </article>
+          </section>
+
+          <section className="metric-strip" aria-label="Composição das vidas ativas">
+            <article className="mini-card holders-card">
+              <div className="mini-card-top">
+                <span className="mini-card-label">
+                  <i className="material-symbols-outlined" aria-hidden="true">badge</i>
+                  Titulares ativos
+                </span>
+                <MetricDelta growth={growth?.totalTitularesAtivos} />
+              </div>
+              <div className="mini-card-value">
+                <strong>{numberFormatter.format(holders)}</strong>
+                <small>{formatShare(holders, totalLives)}</small>
+              </div>
+            </article>
+
+            <article className="mini-card dependents-card">
+              <div className="mini-card-top">
+                <span className="mini-card-label">
+                  <i className="material-symbols-outlined" aria-hidden="true">family_restroom</i>
+                  Dependentes ativos
+                </span>
+                <MetricDelta growth={growth?.totalDependentesAtivos} />
+              </div>
+              <div className="mini-card-value">
+                <strong>{numberFormatter.format(dependents)}</strong>
+                <small>{formatShare(dependents, totalLives)}</small>
+              </div>
+            </article>
+
+            <article className="mini-card date-card">
+              <div className="mini-card-top">
+                <span className="mini-card-label">
+                  <i className="material-symbols-outlined" aria-hidden="true">calendar_today</i>
+                  Data da consulta
+                </span>
+                <span className="timezone-label">UTC-3</span>
+              </div>
+              <div className="mini-card-value date-value">
+                <strong>{formatDateTime(latest?.dataConsulta)}</strong>
+                <small>horário de Fortaleza</small>
+              </div>
+            </article>
+          </section>
+
+          <section className="analytics-grid" id="historico">
+            <article className="analytics-card chart-card">
+              <div className="analytics-heading">
+                <div>
+                  <div className="section-title">
+                    <span className="material-symbols-outlined" aria-hidden="true">show_chart</span>
+                    <h2>Evolução de Vidas Ativas</h2>
+                  </div>
+                  <p>Uma amostra por dia · última leitura diária</p>
+                </div>
+
+                <div className="range-switch" aria-label="Período do histórico">
+                  {[
+                    ["7", "7 dias"],
+                    ["30", "Últimos 30 dias"],
+                    ["90", "90 dias"],
+                    ["custom", "Personalizado"]
+                  ].map(([value, label]) => (
+                    <button
+                      key={value}
+                      className={preset === value ? "active" : ""}
+                      type="button"
+                      onClick={() => changePreset(value)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {preset === "custom" && (
+                <div className="custom-range">
+                  <label>
+                    <span>De</span>
                     <input type="date" value={from} max={to || today} onChange={(event) => setFrom(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>Até</span>
                     <input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} />
-                    <button type="button" onClick={() => void loadDashboard(from, to)}>Aplicar</button>
+                  </label>
+                  <button type="button" onClick={() => void loadDashboard(from, to)}>Aplicar período</button>
+                </div>
+              )}
+
+              <div className="chart-legend" aria-label="Séries do gráfico">
+                <span><i className="total" />Vidas ativas (Total)</span>
+                <span><i className="dependents" />Dependentes ({numberFormatter.format(dependents)})</span>
+                <span><i className="holders" />Titulares ({numberFormatter.format(holders)})</span>
+              </div>
+
+              <div className="chart-surface">
+                {chartData.length ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={chartData} margin={{ top: 18, right: 20, left: 2, bottom: 0 }}>
+                      <CartesianGrid vertical={false} stroke="var(--chart-grid)" strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="label"
+                        tick={{ fill: "var(--text-muted)", fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={{ stroke: "var(--chart-grid-strong)" }}
+                        minTickGap={24}
+                      />
+                      <YAxis
+                        domain={[minLives, "auto"]}
+                        tickFormatter={(value) => numberFormatter.format(value)}
+                        tick={{ fill: "var(--text-muted)", fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                        width={74}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          background: "var(--tooltip)",
+                          border: "1px solid var(--border)",
+                          borderRadius: 12,
+                          boxShadow: "0 14px 30px rgba(0,0,0,.35)"
+                        }}
+                        labelStyle={{ color: "var(--text)" }}
+                        formatter={(value, name) => [numberFormatter.format(Number(value)), name]}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="totalVidasAtivas"
+                        name="Vidas ativas"
+                        stroke="var(--green)"
+                        strokeWidth={3.5}
+                        dot={{ r: 3.5, fill: "var(--chart-surface)", stroke: "var(--green)", strokeWidth: 2 }}
+                        activeDot={{ r: 6 }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="totalDependentesAtivos"
+                        name="Dependentes"
+                        stroke="var(--blue)"
+                        strokeWidth={2.2}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="totalTitularesAtivos"
+                        name="Titulares"
+                        stroke="var(--cyan)"
+                        strokeWidth={2.2}
+                        dot={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="chart-empty">
+                    <span className="material-symbols-outlined" aria-hidden="true">monitoring</span>
+                    <strong>{loading ? "Carregando histórico..." : "Ainda não há amostras neste período."}</strong>
+                    <small>O histórico mantém uma única leitura consolidada por dia.</small>
                   </div>
                 )}
               </div>
-            </div>
 
-            <div className="chart-wrap">
-              {chartData.length ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData} margin={{ top: 16, right: 18, left: 0, bottom: 0 }}>
-                    <CartesianGrid vertical stroke="var(--grid)" strokeDasharray="0" />
-                    <XAxis dataKey="label" tick={{ fill: "var(--muted)", fontSize: 12 }} tickLine={false} axisLine={{ stroke: "var(--grid)" }} minTickGap={24} />
-                    <YAxis domain={[minLives, "auto"]} tickFormatter={(value) => numberFormatter.format(value)} tick={{ fill: "var(--muted)", fontSize: 12 }} tickLine={false} axisLine={false} width={72} />
-                    <Tooltip
-                      contentStyle={{ background: "var(--tooltip)", border: "1px solid var(--border)", borderRadius: 12 }}
-                      labelStyle={{ color: "var(--text)" }}
-                      formatter={(value, name) => [numberFormatter.format(Number(value)), name]}
-                    />
-                    <Line type="monotone" dataKey="totalVidasAtivas" name="Vidas ativas" stroke="var(--green)" strokeWidth={3} dot={{ r: 3, fill: "var(--green)" }} activeDot={{ r: 5 }} />
-                    <Line type="monotone" dataKey="totalTitularesAtivos" name="Titulares" stroke="var(--blue)" strokeWidth={1.6} dot={false} opacity={0.8} />
-                    <Line type="monotone" dataKey="totalDependentesAtivos" name="Dependentes" stroke="var(--cyan)" strokeWidth={1.6} dot={false} opacity={0.7} />
-                  </LineChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="empty-state">{loading ? "Carregando histórico..." : "Ainda não há amostras neste período."}</div>
-              )}
-            </div>
-          </article>
-
-          <aside className="side-column">
-            <article className="panel summary-panel">
-              <h2><BarsIcon /> Resumo</h2>
-              <dl>
-                <div><dt>Vidas Ativas (atual)</dt><dd>{numberFormatter.format(latest?.totalVidasAtivas ?? 0)}</dd></div>
-                <div><dt>Variação (período)</dt><dd className={growth?.totalVidasAtivas.percentage != null && growth.totalVidasAtivas.percentage < 0 ? "down" : "up"}>{formatPercent(growth?.totalVidasAtivas.percentage)}</dd></div>
-                <div><dt>Início do período</dt><dd>{numberFormatter.format(data?.first?.totalVidasAtivas ?? 0)}</dd></div>
-                <div><dt>Fim do período</dt><dd>{numberFormatter.format(data?.last?.totalVidasAtivas ?? 0)}</dd></div>
-                <div><dt>Dias com histórico</dt><dd>{data?.trend.length ?? 0}</dd></div>
-              </dl>
-            </article>
-
-            <article className="panel recent-panel">
-              <h2><span>◷</span> Últimos dias</h2>
-              <div className="recent-list">
-                {(data?.recent ?? []).map((item, index) => {
-                  const previous = data?.recent[index + 1];
-                  const pct = previous?.totalVidasAtivas
-                    ? ((item.totalVidasAtivas - previous.totalVidasAtivas) / previous.totalVidasAtivas) * 100
-                    : null;
-                  return (
-                    <div className="recent-row" key={`${item.collectedAt}-${index}`}>
-                      <time>{formatDateTime(item.dataConsulta).replace(/\/\d{4},?\s?/, "")}</time>
-                      <strong>{numberFormatter.format(item.totalVidasAtivas)}</strong>
-                      <span className={pct != null && pct < 0 ? "down" : "up"}>{formatPercent(pct)}</span>
-                    </div>
-                  );
-                })}
-                {!data?.recent.length && <div className="empty-mini">Sem histórico diário ainda.</div>}
+              <div className="chart-footnote">
+                <span>Histórico diário preservando a última leitura de cada data.</span>
+                <span className="verified"><i className="material-symbols-outlined" aria-hidden="true">verified</i> Sincronização automática</span>
               </div>
             </article>
-          </aside>
-        </section>
-      </div>
 
-      <footer id="sobre">
-        <div><strong>Vidômetro</strong><small>Dados atualizados automaticamente via Supabase</small></div>
-        <span>♥ <small>Menos burocracia. Mais saúde.</small></span>
+            <aside className="side-column">
+              <article className="side-card summary-card">
+                <div className="side-card-heading">
+                  <span>
+                    <i className="material-symbols-outlined" aria-hidden="true">analytics</i>
+                    <strong>Resumo</strong>
+                  </span>
+                  <small>Período atual</small>
+                </div>
+                <dl>
+                  <div><dt>Vidas Ativas (atual)</dt><dd>{numberFormatter.format(totalLives)}</dd></div>
+                  <div><dt>Variação (período)</dt><dd><MetricDelta growth={growth?.totalVidasAtivas} /></dd></div>
+                  <div><dt>Início do período</dt><dd>{numberFormatter.format(data?.first?.totalVidasAtivas ?? 0)}</dd></div>
+                  <div><dt>Fim do período</dt><dd>{numberFormatter.format(data?.last?.totalVidasAtivas ?? 0)}</dd></div>
+                  <div><dt>Dias com histórico</dt><dd className="secondary-value">{data?.trend.length ?? 0}</dd></div>
+                </dl>
+              </article>
+
+              <article className="side-card recent-card">
+                <div className="side-card-heading">
+                  <span>
+                    <i className="material-symbols-outlined cyan" aria-hidden="true">history_toggle_off</i>
+                    <strong>Últimos dias</strong>
+                  </span>
+                  <i className={`activity-dot ${online ? "online" : ""}`} />
+                </div>
+
+                <div className="recent-list">
+                  {(data?.recent ?? []).map((item, index) => {
+                    const previous = data?.recent[index + 1];
+                    const pct = previous?.totalVidasAtivas
+                      ? ((item.totalVidasAtivas - previous.totalVidasAtivas) / previous.totalVidasAtivas) * 100
+                      : null;
+                    return (
+                      <div className="recent-row" key={`${item.collectedAt}-${index}`}>
+                        <div className="recent-date">
+                          <i />
+                          <span>
+                            <strong>{formatDate(item.dataConsulta)}</strong>
+                            <small>{formatTime(item.dataConsulta)} · Atualização API</small>
+                          </span>
+                        </div>
+                        <div className="recent-values">
+                          <strong>{numberFormatter.format(item.totalVidasAtivas)}</strong>
+                          <span className={pct != null && pct < 0 ? "negative" : pct != null ? "positive" : "neutral"}>{formatPercent(pct)}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {!data?.recent.length && (
+                    <div className="recent-empty">
+                      <span className="material-symbols-outlined" aria-hidden="true">inventory_2</span>
+                      <p>Sem histórico diário ainda.</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="daily-note">
+                  <span className="material-symbols-outlined" aria-hidden="true">info</span>
+                  Uma linha por dia, sempre atualizada com a leitura mais recente.
+                </div>
+              </article>
+            </aside>
+          </section>
+
+          <section className="about-card" id="sobre">
+            <span className="material-symbols-outlined" aria-hidden="true">database</span>
+            <div>
+              <strong>Telemetria operacional Odontoart</strong>
+              <p>O Vidômetro lê o histórico consolidado no Supabase e apresenta a última leitura disponível com atualização automática do painel.</p>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <footer className="app-footer">
+        <div className="footer-inner">
+          <span>
+            <strong>Vidômetro</strong>
+            <small>Dados atualizados automaticamente via Supabase</small>
+          </span>
+          <span className="footer-message"><i>♥</i> Menos burocracia. Mais saúde.</span>
+        </div>
       </footer>
-    </main>
+    </div>
   );
 }
