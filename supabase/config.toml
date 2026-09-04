@@ -1,0 +1,4 @@
+project_id = "vidometro"
+
+[functions.collect-active-lives]
+verify_jwt = true
