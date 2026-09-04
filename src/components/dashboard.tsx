@@ -26,7 +26,7 @@ type Growth = {
 };
 
 type DashboardPayload = {
-  sampling: "day";
+  sampling: "day" | "realtime";
   latest: Snapshot | null;
   first: Snapshot | null;
   last: Snapshot | null;
@@ -39,6 +39,16 @@ type DashboardPayload = {
   recent: Snapshot[];
 };
 
+type Preset = "realtime" | "1" | "7" | "30" | "90" | "custom";
+
+type SavedPreferences = {
+  preset?: Preset;
+  from?: string;
+  to?: string;
+};
+
+const PREFERENCES_KEY = "vidometro-dashboard-preferences";
+const VALID_PRESETS = new Set<Preset>(["realtime", "1", "7", "30", "90", "custom"]);
 const numberFormatter = new Intl.NumberFormat("pt-BR");
 const dateTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   timeZone: "America/Fortaleza",
@@ -82,6 +92,10 @@ function shiftIsoDate(value: string, days: number) {
   return date.toISOString().slice(0, 10);
 }
 
+function isIsoDate(value?: string) {
+  return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
+}
+
 function formatDateTime(value?: string | null) {
   if (!value) return "—";
   const date = new Date(value);
@@ -104,7 +118,7 @@ function formatPercent(value?: number | null) {
   if (value == null || !Number.isFinite(value)) return "—";
   return `${value >= 0 ? "+" : ""}${value.toLocaleString("pt-BR", {
     minimumFractionDigits: 1,
-    maximumFractionDigits: 1
+    maximumFractionDigits: 3
   })}%`;
 }
 
@@ -143,26 +157,30 @@ export function Dashboard() {
   const [today, setToday] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const [preset, setPreset] = useState("30");
+  const [preset, setPreset] = useState<Preset>("30");
+  const [preferencesReady, setPreferencesReady] = useState(false);
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
 
-  async function loadDashboard(nextFrom: string, nextTo: string, quiet = false) {
+  async function loadTelemetry(mode: Preset, nextFrom: string, nextTo: string, quiet = false) {
     if (!nextFrom || !nextTo) return;
     if (!quiet) setLoading(true);
     setError(null);
 
     try {
       const supabase = getSupabaseClient();
-      const { data: payload, error: rpcError } = await supabase.rpc("vidometro_dashboard", {
-        p_from: nextFrom,
-        p_to: nextTo
-      });
-      if (rpcError) throw rpcError;
-      setData(payload as DashboardPayload);
+      const result = mode === "realtime"
+        ? await supabase.rpc("vidometro_realtime")
+        : await supabase.rpc("vidometro_dashboard", {
+            p_from: nextFrom,
+            p_to: nextTo
+          });
+
+      if (result.error) throw result.error;
+      setData(result.data as DashboardPayload);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Não foi possível carregar o Vidômetro.");
     } finally {
@@ -171,42 +189,81 @@ export function Dashboard() {
   }
 
   useEffect(() => {
-    const saved = localStorage.getItem("vidometro-theme");
-    const resolvedTheme = saved === "light" ? "light" : "dark";
+    const savedTheme = localStorage.getItem("vidometro-theme");
+    const resolvedTheme = savedTheme === "light" ? "light" : "dark";
     setTheme(resolvedTheme);
     document.documentElement.dataset.theme = resolvedTheme;
 
     const resolvedToday = fortalezaToday();
-    const resolvedFrom = shiftIsoDate(resolvedToday, -29);
+    let resolvedPreset: Preset = "30";
+    let resolvedFrom = shiftIsoDate(resolvedToday, -29);
+    let resolvedTo = resolvedToday;
+
+    try {
+      const raw = localStorage.getItem(PREFERENCES_KEY);
+      const saved = raw ? JSON.parse(raw) as SavedPreferences : null;
+      if (saved?.preset && VALID_PRESETS.has(saved.preset)) {
+        resolvedPreset = saved.preset;
+      }
+
+      if (resolvedPreset === "custom") {
+        if (isIsoDate(saved?.from) && isIsoDate(saved?.to) && saved!.from! <= saved!.to!) {
+          resolvedFrom = saved!.from!;
+          resolvedTo = saved!.to!;
+        } else {
+          resolvedPreset = "30";
+        }
+      }
+    } catch {
+      localStorage.removeItem(PREFERENCES_KEY);
+    }
+
+    if (resolvedPreset === "realtime" || resolvedPreset === "1") {
+      resolvedFrom = resolvedToday;
+      resolvedTo = resolvedToday;
+    } else if (resolvedPreset !== "custom") {
+      const days = Number(resolvedPreset);
+      resolvedFrom = shiftIsoDate(resolvedToday, -(days - 1));
+      resolvedTo = resolvedToday;
+    }
+
     setToday(resolvedToday);
+    setPreset(resolvedPreset);
     setFrom(resolvedFrom);
-    setTo(resolvedToday);
-    void loadDashboard(resolvedFrom, resolvedToday);
+    setTo(resolvedTo);
+    setPreferencesReady(true);
+    void loadTelemetry(resolvedPreset, resolvedFrom, resolvedTo);
   }, []);
 
   useEffect(() => {
-    if (!from || !to) return;
-    const interval = window.setInterval(() => {
-      void loadDashboard(from, to, true);
-    }, 5 * 60 * 1000);
-    return () => window.clearInterval(interval);
-  }, [from, to]);
+    if (!preferencesReady || !from || !to) return;
+    const preferences: SavedPreferences = { preset, from, to };
+    localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
+  }, [preferencesReady, preset, from, to]);
 
   useEffect(() => {
-    if (!from || !to) return;
+    if (!preferencesReady || !from || !to) return;
+    const interval = window.setInterval(() => {
+      void loadTelemetry(preset, from, to, true);
+    }, 5 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [preferencesReady, preset, from, to]);
+
+  useEffect(() => {
+    if (!preferencesReady || !from || !to) return;
 
     const supabase = getSupabaseClient();
     const channel = supabase
-      .channel(`vidometro-active-lives-${from}-${to}`)
+      .channel(`vidometro-active-lives-${preset}-${from}-${to}`)
       .on(
         "postgres_changes",
         {
           event: "*",
           schema: "public",
-          table: "active_lives_snapshots"
+          table: "active_lives_realtime_samples"
         },
         () => {
-          void loadDashboard(from, to, true);
+          void loadTelemetry(preset, from, to, true);
         }
       )
       .subscribe();
@@ -214,7 +271,7 @@ export function Dashboard() {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [from, to]);
+  }, [preferencesReady, preset, from, to]);
 
   function toggleTheme() {
     const next = theme === "dark" ? "light" : "dark";
@@ -226,18 +283,21 @@ export function Dashboard() {
   async function refreshNow() {
     if (!from || !to) return;
     setRefreshing(true);
-    await loadDashboard(from, to, true);
+    await loadTelemetry(preset, from, to, true);
     setRefreshing(false);
   }
 
-  function changePreset(value: string) {
+  function changePreset(value: Preset) {
     setPreset(value);
     if (value === "custom" || !today) return;
-    const days = Number(value);
-    const nextFrom = shiftIsoDate(today, -(days - 1));
+
+    const nextFrom = value === "realtime" || value === "1"
+      ? today
+      : shiftIsoDate(today, -(Number(value) - 1));
+
     setFrom(nextFrom);
     setTo(today);
-    void loadDashboard(nextFrom, today);
+    void loadTelemetry(value, nextFrom, today);
   }
 
   const latest = data?.latest;
@@ -247,10 +307,15 @@ export function Dashboard() {
   const dependents = latest?.totalDependentesAtivos ?? 0;
   const lastCollectedAt = latest ? new Date(latest.collectedAt).getTime() : 0;
   const online = Boolean(lastCollectedAt && Date.now() - lastCollectedAt < 15 * 60 * 1000);
+  const realtimeMode = preset === "realtime";
 
   const chartData = (data?.trend ?? []).map((item) => ({
     ...item,
-    label: preset === "1" ? "Hoje" : shortDateFormatter.format(new Date(item.dataConsulta))
+    label: realtimeMode
+      ? formatTime(item.dataConsulta)
+      : preset === "1"
+        ? "Hoje"
+        : shortDateFormatter.format(new Date(item.dataConsulta))
   }));
 
   const allChartValues = chartData.flatMap((item) => [
@@ -261,6 +326,12 @@ export function Dashboard() {
   const minLives = allChartValues.length
     ? Math.max(0, Math.floor(Math.min(...allChartValues) / 1000) * 1000)
     : 0;
+
+  const chartDescription = realtimeMode
+    ? "Uma amostra por ciclo de coleta · atualização aproximada a cada 5 minutos"
+    : preset === "1"
+      ? "Hoje · última leitura diária consolidada"
+      : "Uma amostra por dia · última leitura diária";
 
   return (
     <div className="app-shell">
@@ -354,7 +425,7 @@ export function Dashboard() {
 
               <div className="hero-number-block">
                 <strong>{loading && !latest ? "—" : numberFormatter.format(totalLives)}</strong>
-                <small><i /> variação no período selecionado</small>
+                <small><i /> {realtimeMode ? "variação em relação ao ciclo anterior" : "variação no período selecionado"}</small>
               </div>
 
               <div className="hero-metric-footer">
@@ -416,11 +487,12 @@ export function Dashboard() {
                     <span className="material-symbols-outlined" aria-hidden="true">show_chart</span>
                     <h2>Evolução de Vidas Ativas</h2>
                   </div>
-                  <p>{preset === "1" ? "Hoje · última leitura disponível" : "Uma amostra por dia · última leitura diária"}</p>
+                  <p>{chartDescription}</p>
                 </div>
 
                 <div className="range-switch" aria-label="Período do histórico">
                   {[
+                    ["realtime", "Realtime"],
                     ["1", "1 dia"],
                     ["7", "7 dias"],
                     ["30", "Últimos 30 dias"],
@@ -431,7 +503,7 @@ export function Dashboard() {
                       key={value}
                       className={preset === value ? "active" : ""}
                       type="button"
-                      onClick={() => changePreset(value)}
+                      onClick={() => changePreset(value as Preset)}
                     >
                       {label}
                     </button>
@@ -449,7 +521,7 @@ export function Dashboard() {
                     <span>Até</span>
                     <input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} />
                   </label>
-                  <button type="button" onClick={() => void loadDashboard(from, to)}>Aplicar período</button>
+                  <button type="button" onClick={() => void loadTelemetry("custom", from, to)}>Aplicar período</button>
                 </div>
               )}
 
@@ -469,7 +541,7 @@ export function Dashboard() {
                         tick={{ fill: "var(--text-muted)", fontSize: 11 }}
                         tickLine={false}
                         axisLine={{ stroke: "var(--chart-grid-strong)" }}
-                        minTickGap={24}
+                        minTickGap={realtimeMode ? 18 : 24}
                       />
                       <YAxis
                         domain={[minLives, "auto"]}
@@ -495,7 +567,7 @@ export function Dashboard() {
                         name="Vidas ativas"
                         stroke="var(--green)"
                         strokeWidth={3.5}
-                        dot={{ r: 3.5, fill: "var(--chart-surface)", stroke: "var(--green)", strokeWidth: 2 }}
+                        dot={{ r: realtimeMode ? 2.5 : 3.5, fill: "var(--chart-surface)", stroke: "var(--green)", strokeWidth: 2 }}
                         activeDot={{ r: 6 }}
                       />
                       <Line
@@ -504,7 +576,7 @@ export function Dashboard() {
                         name="Dependentes"
                         stroke="var(--blue)"
                         strokeWidth={2.2}
-                        dot={preset === "1" ? { r: 4, fill: "var(--chart-surface)", stroke: "var(--blue)", strokeWidth: 2 } : false}
+                        dot={realtimeMode || preset === "1" ? { r: 3, fill: "var(--chart-surface)", stroke: "var(--blue)", strokeWidth: 2 } : false}
                       />
                       <Line
                         type="monotone"
@@ -512,21 +584,21 @@ export function Dashboard() {
                         name="Titulares"
                         stroke="var(--cyan)"
                         strokeWidth={2.2}
-                        dot={preset === "1" ? { r: 4, fill: "var(--chart-surface)", stroke: "var(--cyan)", strokeWidth: 2 } : false}
+                        dot={realtimeMode || preset === "1" ? { r: 3, fill: "var(--chart-surface)", stroke: "var(--cyan)", strokeWidth: 2 } : false}
                       />
                     </LineChart>
                   </ResponsiveContainer>
                 ) : (
                   <div className="chart-empty">
                     <span className="material-symbols-outlined" aria-hidden="true">monitoring</span>
-                    <strong>{loading ? "Carregando histórico..." : "Ainda não há amostras neste período."}</strong>
-                    <small>O histórico mantém uma única leitura consolidada por dia.</small>
+                    <strong>{loading ? "Carregando histórico..." : realtimeMode ? "Aguardando o primeiro ciclo realtime." : "Ainda não há amostras neste período."}</strong>
+                    <small>{realtimeMode ? "As amostras surgem automaticamente a cada coleta da API." : "O histórico mantém uma única leitura consolidada por dia."}</small>
                   </div>
                 )}
               </div>
 
               <div className="chart-footnote">
-                <span>{preset === "1" ? "Exibindo a leitura consolidada de hoje." : "Histórico diário preservando a última leitura de cada data."}</span>
+                <span>{realtimeMode ? "Realtime mantém apenas a janela operacional recente; o histórico oficial continua diário." : preset === "1" ? "Exibindo a leitura consolidada de hoje." : "Histórico diário preservando a última leitura de cada data."}</span>
                 <span className="verified"><i className="material-symbols-outlined" aria-hidden="true">verified</i> Sincronização automática</span>
               </div>
             </article>
@@ -538,14 +610,14 @@ export function Dashboard() {
                     <i className="material-symbols-outlined" aria-hidden="true">analytics</i>
                     <strong>Resumo</strong>
                   </span>
-                  <small>Período atual</small>
+                  <small>{realtimeMode ? "Realtime" : "Período atual"}</small>
                 </div>
                 <dl>
                   <div><dt>Vidas Ativas (atual)</dt><dd>{numberFormatter.format(totalLives)}</dd></div>
-                  <div><dt>Variação (período)</dt><dd><MetricDelta growth={growth?.totalVidasAtivas} /></dd></div>
-                  <div><dt>Início do período</dt><dd>{numberFormatter.format(data?.first?.totalVidasAtivas ?? 0)}</dd></div>
-                  <div><dt>Fim do período</dt><dd>{numberFormatter.format(data?.last?.totalVidasAtivas ?? 0)}</dd></div>
-                  <div><dt>Dias com histórico</dt><dd className="secondary-value">{data?.trend.length ?? 0}</dd></div>
+                  <div><dt>{realtimeMode ? "Variação (último ciclo)" : "Variação (período)"}</dt><dd><MetricDelta growth={growth?.totalVidasAtivas} /></dd></div>
+                  <div><dt>{realtimeMode ? "Primeiro ciclo do dia" : "Início do período"}</dt><dd>{numberFormatter.format(data?.first?.totalVidasAtivas ?? 0)}</dd></div>
+                  <div><dt>{realtimeMode ? "Último ciclo" : "Fim do período"}</dt><dd>{numberFormatter.format(data?.last?.totalVidasAtivas ?? 0)}</dd></div>
+                  <div><dt>{realtimeMode ? "Ciclos no gráfico" : "Dias com histórico"}</dt><dd className="secondary-value">{data?.trend.length ?? 0}</dd></div>
                 </dl>
               </article>
 
@@ -601,7 +673,7 @@ export function Dashboard() {
             <span className="material-symbols-outlined" aria-hidden="true">database</span>
             <div>
               <strong>Telemetria operacional Odontoart</strong>
-              <p>O Vidômetro lê o histórico consolidado no Supabase e apresenta a última leitura disponível com atualização automática do painel.</p>
+              <p>O Vidômetro combina histórico diário consolidado com uma janela realtime de cada ciclo de coleta e atualiza o painel automaticamente após novas leituras.</p>
             </div>
           </section>
         </div>
