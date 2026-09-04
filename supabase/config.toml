@@ -1,4 +1,6 @@
 project_id = "vidometro"
 
 [functions.collect-active-lives]
-verify_jwt = true
+# Chamadas service-to-service usam a Secret Key no header apikey.
+# A própria função valida essa chave antes de executar a coleta.
+verify_jwt = false
