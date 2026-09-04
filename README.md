@@ -1,98 +1,170 @@
 # Vidômetro
 
-Dashboard independente para acompanhar as vidas ativas da Odontoart Online.
+Dashboard público para acompanhar as vidas ativas da Odontoart Online, com histórico e variação por período.
 
-## O que o sistema mostra
+## Arquitetura
 
-- `totalVidasAtivas` em destaque;
-- `totalTitularesAtivos`;
-- `totalDependentesAtivos`;
-- `dataConsulta`;
-- atualização automática a cada 5 minutos enquanto o painel está aberto;
-- histórico persistido em PostgreSQL;
-- variação absoluta e percentual entre duas datas;
-- gráfico de evolução das vidas ativas;
-- gráfico de titulares x dependentes;
-- tema claro/escuro persistido no navegador.
+```text
+GitHub
+  ├── main
+  └── GitHub Actions
+       ├── frontend estático -> GitHub Pages
+       └── migrations + Edge Functions -> Supabase
 
-## API consultada
+Supabase
+  ├── PostgreSQL
+  ├── Edge Function collect-active-lives
+  └── histórico + RPC do dashboard
+```
+
+Não existe servidor Node em produção. O Next.js é exportado como site estático e o navegador acessa apenas a API pública do Supabase. O token da API Odontoart fica exclusivamente nos secrets da Edge Function.
+
+## Coleta
+
+A função `collect-active-lives` consulta:
 
 ```text
 GET https://{{Endpoint}}/v2/api/contratos/vidasAtivas?token={{token}}
 ```
 
-O token nunca é enviado ao navegador. A consulta é feita exclusivamente no servidor Next.js.
+A coleta é deduplicada em janelas de cinco minutos e persiste:
 
-## Requisitos
+- `totalVidasAtivas`
+- `totalTitularesAtivos`
+- `totalDependentesAtivos`
+- `dataConsulta`
+- horário em que o snapshot foi armazenado
 
-- Node.js 22+
-- PostgreSQL 16+ recomendado
+O Supabase Cron chama a Edge Function a cada cinco minutos. O botão **Atualizar agora** também pode invocá-la, sem causar uma segunda coleta dentro da mesma janela.
 
-## Configuração
+## 1. Criar o projeto Supabase
 
-Copie `.env.example` para `.env.local`:
+Crie um projeto de produção no Supabase. Guarde:
 
-```env
-VIDAS_ATIVAS_API_ENDPOINT=https://SEU_ENDPOINT
-VIDAS_ATIVAS_API_TOKEN=SEU_TOKEN
-VIDAS_ATIVAS_API_TIMEOUT_MS=15000
-DATABASE_URL=postgresql://usuario:senha@localhost:5432/vidometro
-DATABASE_SSL=false
-CRON_SECRET=UM_SEGREDO_LONGO
+- Project Ref
+- Database password
+- Project URL
+- Publishable Key
+
+## 2. Secrets da Edge Function
+
+Autentique a Supabase CLI e configure os segredos da API Odontoart:
+
+```bash
+supabase secrets set \
+  VIDAS_ATIVAS_API_ENDPOINT="https://SEU_ENDPOINT" \
+  VIDAS_ATIVAS_API_TOKEN="SEU_TOKEN" \
+  VIDAS_ATIVAS_API_TIMEOUT_MS="15000" \
+  --project-ref SEU_PROJECT_REF
 ```
 
-`VIDAS_ATIVAS_API_ENDPOINT` pode ser somente a origem ou a URL completa terminando em `/v2/api/contratos/vidasAtivas`.
+Nunca use prefixo `NEXT_PUBLIC_` nesses valores.
 
-## Instalação
+## 3. Bootstrap do Supabase Vault
+
+Depois que a migration for aplicada, execute uma única vez no **SQL Editor** do Supabase:
+
+```sql
+select vault.create_secret(
+  'https://SEU_PROJECT_REF.supabase.co',
+  'project_url'
+);
+
+select vault.create_secret(
+  'SUA_PUBLISHABLE_KEY',
+  'publishable_key'
+);
+```
+
+Esses valores permitem que o `pg_cron` invoque a Edge Function a cada cinco minutos. A migration cria o job `vidometro-collect-active-lives` automaticamente.
+
+Para conferir o cron:
+
+```sql
+select jobid, jobname, schedule, active
+from cron.job
+where jobname = 'vidometro-collect-active-lives';
+```
+
+## 4. GitHub Repository Secrets
+
+Em **Settings > Secrets and variables > Actions > Secrets**, configure:
+
+```text
+SUPABASE_ACCESS_TOKEN
+SUPABASE_PROJECT_ID
+SUPABASE_DB_PASSWORD
+```
+
+O workflow `.github/workflows/deploy-supabase.yml` usa esses valores para aplicar migrations e publicar as Edge Functions quando houver alteração em `supabase/**` na `main`.
+
+## 5. GitHub Repository Variables
+
+Em **Settings > Secrets and variables > Actions > Variables**, configure:
+
+```text
+NEXT_PUBLIC_SUPABASE_URL=https://SEU_PROJECT_REF.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=SUA_PUBLISHABLE_KEY
+```
+
+Esses dois valores são utilizados pelo frontend estático. A Publishable Key é uma credencial pública e o acesso aos dados é limitado por RLS e pelos grants definidos na migration.
+
+## 6. GitHub Pages
+
+Em **Settings > Pages**, selecione **GitHub Actions** como source.
+
+Após merge na `main`, `.github/workflows/deploy-pages.yml`:
+
+1. instala as dependências;
+2. executa `next build` com `output: export`;
+3. publica `out/` no GitHub Pages.
+
+Para este repositório, o Next.js usa `/vidometro` como `basePath` durante o build no GitHub Actions.
+
+## Banco e segurança
+
+A migration em `supabase/migrations/` cria `public.active_lives_snapshots`, habilita RLS e concede ao cliente público somente leitura. Escrita e atualização são feitas pela Edge Function usando a Service Role disponibilizada pelo próprio ambiente do Supabase.
+
+O frontend não consulta milhares de snapshots diretamente. A RPC `vidometro_dashboard(from, to)` calcula no PostgreSQL:
+
+- snapshot atual;
+- primeiro e último valor do período;
+- crescimento absoluto e percentual;
+- amostragem por hora para períodos curtos;
+- amostragem diária para períodos maiores;
+- últimas atualizações.
+
+## Desenvolvimento local
+
+Crie `.env.local`:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://SEU_PROJECT_REF.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=SUA_PUBLISHABLE_KEY
+```
+
+Depois:
 
 ```bash
 npm install
-npm run db:migrate
 npm run dev
 ```
 
-Abra `http://localhost:3000`.
-
-## Coleta de 5 em 5 minutos
-
-O painel chama `POST /api/collect` automaticamente a cada 5 minutos. O backend deduplica coletas dentro da mesma janela de 5 minutos, evitando chamadas repetidas quando vários navegadores estão abertos.
-
-Para manter a coleta **24 horas por dia mesmo sem ninguém com o painel aberto**, configure seu agendador/cron para chamar:
-
-```text
-GET https://SEU_DOMINIO/api/cron/collect
-Authorization: Bearer SEU_CRON_SECRET
-```
-
-Cron recomendado:
-
-```text
-*/5 * * * *
-```
-
-## Cálculo de crescimento
-
-Ao selecionar, por exemplo, `01/09/2026` até `30/09/2026`, o sistema pega o primeiro e o último snapshot existentes no intervalo:
-
-```text
-variação absoluta = último - primeiro
-variação percentual = (último - primeiro) / primeiro * 100
-```
-
-O cálculo é exibido separadamente para vidas ativas, titulares e dependentes. Períodos de até 3 dias usam amostragem por hora nos gráficos; períodos maiores usam uma amostra por dia.
-
-## Rotas internas
-
-- `GET /api/dashboard?from=2026-09-01&to=2026-09-30`
-- `POST /api/collect`
-- `GET /api/cron/collect` (protegido por `CRON_SECRET`)
-
-## Qualidade
+Validação local:
 
 ```bash
 npm run typecheck
-npm run test
 npm run build
 ```
 
-O repositório inclui CI com PostgreSQL para validar migration, TypeScript, testes e build em cada pull request.
+## Produção
+
+O fluxo de produção é propositalmente simples:
+
+```text
+merge em main
+   ├── GitHub Pages recebe o novo frontend
+   └── Supabase recebe migrations/Edge Functions quando alteradas
+```
+
+Não há Vercel nem servidor de aplicação intermediário.
