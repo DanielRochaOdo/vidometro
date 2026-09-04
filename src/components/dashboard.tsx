@@ -192,6 +192,30 @@ export function Dashboard() {
     return () => window.clearInterval(interval);
   }, [from, to]);
 
+  useEffect(() => {
+    if (!from || !to) return;
+
+    const supabase = getSupabaseClient();
+    const channel = supabase
+      .channel(`vidometro-active-lives-${from}-${to}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "active_lives_snapshots"
+        },
+        () => {
+          void loadDashboard(from, to, true);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [from, to]);
+
   function toggleTheme() {
     const next = theme === "dark" ? "light" : "dark";
     setTheme(next);
@@ -226,7 +250,7 @@ export function Dashboard() {
 
   const chartData = (data?.trend ?? []).map((item) => ({
     ...item,
-    label: shortDateFormatter.format(new Date(item.dataConsulta))
+    label: preset === "1" ? "Hoje" : shortDateFormatter.format(new Date(item.dataConsulta))
   }));
 
   const allChartValues = chartData.flatMap((item) => [
@@ -237,6 +261,10 @@ export function Dashboard() {
   const minLives = allChartValues.length
     ? Math.max(0, Math.floor(Math.min(...allChartValues) / 1000) * 1000)
     : 0;
+
+  const singleDayDot = preset === "1"
+    ? { r: 4, fill: "var(--chart-surface)", strokeWidth: 2 }
+    : false;
 
   return (
     <div className="app-shell">
@@ -392,11 +420,12 @@ export function Dashboard() {
                     <span className="material-symbols-outlined" aria-hidden="true">show_chart</span>
                     <h2>Evolução de Vidas Ativas</h2>
                   </div>
-                  <p>Uma amostra por dia · última leitura diária</p>
+                  <p>{preset === "1" ? "Hoje · última leitura disponível" : "Uma amostra por dia · última leitura diária"}</p>
                 </div>
 
                 <div className="range-switch" aria-label="Período do histórico">
                   {[
+                    ["1", "1 dia"],
                     ["7", "7 dias"],
                     ["30", "Últimos 30 dias"],
                     ["90", "90 dias"],
@@ -479,7 +508,7 @@ export function Dashboard() {
                         name="Dependentes"
                         stroke="var(--blue)"
                         strokeWidth={2.2}
-                        dot={false}
+                        dot={singleDayDot ? { ...singleDayDot, stroke: "var(--blue)" } : false}
                       />
                       <Line
                         type="monotone"
@@ -487,7 +516,7 @@ export function Dashboard() {
                         name="Titulares"
                         stroke="var(--cyan)"
                         strokeWidth={2.2}
-                        dot={false}
+                        dot={singleDayDot ? { ...singleDayDot, stroke: "var(--cyan)" } : false}
                       />
                     </LineChart>
                   </ResponsiveContainer>
@@ -501,7 +530,7 @@ export function Dashboard() {
               </div>
 
               <div className="chart-footnote">
-                <span>Histórico diário preservando a última leitura de cada data.</span>
+                <span>{preset === "1" ? "Exibindo a leitura consolidada de hoje." : "Histórico diário preservando a última leitura de cada data."}</span>
                 <span className="verified"><i className="material-symbols-outlined" aria-hidden="true">verified</i> Sincronização automática</span>
               </div>
             </article>
