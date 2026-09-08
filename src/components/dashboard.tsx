@@ -205,7 +205,7 @@ export function Dashboard() {
       setData(nextData);
       return nextData;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Não foi possível carregar o Vidômetro.");
+      setError(cause instanceof Error ? cause.message : "Não foi possível carregar o Vidâmetro.");
       return null;
     } finally {
       if (!quiet) setLoading(false);
@@ -361,10 +361,10 @@ export function Dashboard() {
       <header className="app-header">
         <div className="header-inner">
           <div className="header-left">
-            <a className="brand" href="#inicio" aria-label="Vidômetro - início">
+            <a className="brand" href="#inicio" aria-label="Vidâmetro - início">
               <BrandMark />
               <span className="brand-copy">
-                <span className="brand-title-row"><strong>Vidômetro</strong><em>Odontoart</em></span>
+                <span className="brand-title-row"><strong>Vidâmetro</strong><em>Odontoart</em></span>
                 <small>Acompanhamento de Vidas Ativas</small>
               </span>
             </a>
@@ -521,7 +521,7 @@ export function Dashboard() {
         </div>
       </main>
 
-      <footer className="app-footer"><div className="footer-inner"><span><strong>Vidômetro</strong></span></div></footer>
+      <footer className="app-footer"><div className="footer-inner"><span><strong>Vidâmetro</strong></span></div></footer>
     </div>
   );
 }

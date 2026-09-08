@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Vidômetro Odontoart",
+  title: "Vidâmetro Odontoart",
   description: "Contador e histórico de vidas ativas da Odontoart"
 };
 
