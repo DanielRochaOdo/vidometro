@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import {
+  Area,
   CartesianGrid,
+  ComposedChart,
   Line,
-  LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -41,6 +43,20 @@ type DashboardPayload = {
 
 type Preset = "realtime" | "1" | "7" | "30" | "90" | "custom";
 type SavedPreferences = { preset?: Preset; from?: string; to?: string };
+type ChartView = "smooth" | "ticks";
+type ChartPoint = Snapshot & {
+  label: string;
+  tickAbsolute: number | null;
+  tickPercentage: number | null;
+};
+
+type MarketStatProps = {
+  label: string;
+  value: string;
+  hint?: string;
+  tone?: "default" | "positive" | "negative" | "current";
+  icon?: string;
+};
 
 const PREFERENCES_KEY = "vidometro-dashboard-preferences";
 const VALID_PRESETS = new Set<Preset>(["realtime", "1", "7", "30", "90", "custom"]);
@@ -166,13 +182,40 @@ function BrandMark() {
   return <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>;
 }
 
-function MarketStat({ label, value, hint, accent = "var(--text)" }: { label: string; value: string; hint?: string; accent?: string }) {
+function MarketStat({ label, value, hint, tone = "default", icon }: MarketStatProps) {
   return (
-    <span style={{ minWidth: 94, display: "flex", flexDirection: "column", gap: 4 }}>
-      <small style={{ color: "var(--text-faint)", fontSize: 9, fontWeight: 800, letterSpacing: ".08em", textTransform: "uppercase" }}>{label}</small>
-      <strong style={{ color: accent, fontFamily: "Plus Jakarta Sans, sans-serif", fontSize: 15, fontVariantNumeric: "tabular-nums" }}>{value}</strong>
-      {hint && <em style={{ color: "var(--text-faint)", fontSize: 9, fontStyle: "normal" }}>{hint}</em>}
-    </span>
+    <div className={`market-stat ${tone}`}>
+      <span className="market-stat-label">
+        {label}
+        {icon && <span className="material-symbols-outlined" aria-hidden="true">{icon}</span>}
+      </span>
+      <strong>{value}</strong>
+      {hint && <small>{hint}</small>}
+    </div>
+  );
+}
+
+function AnalyticsTooltip({ active, payload, label }: any) {
+  const point = payload?.[0]?.payload as ChartPoint | undefined;
+  if (!active || !point) return null;
+  const direction = point.tickPercentage == null || point.tickPercentage === 0 ? "neutral" : point.tickPercentage > 0 ? "positive" : "negative";
+
+  return (
+    <div className="analytics-tooltip">
+      <div className="analytics-tooltip-header">
+        <span><i /> Leitura selecionada</span>
+        <strong>{String(label ?? "")}</strong>
+      </div>
+      <dl>
+        <div><dt>Total vidas</dt><dd className="total">{numberFormatter.format(point.totalVidasAtivas)}</dd></div>
+        <div><dt>Dependentes</dt><dd className="dependents">{numberFormatter.format(point.totalDependentesAtivos)}</dd></div>
+        <div><dt>Titulares</dt><dd className="holders">{numberFormatter.format(point.totalTitularesAtivos)}</dd></div>
+      </dl>
+      <div className={`analytics-tooltip-delta ${direction}`}>
+        <span>Variação anterior</span>
+        <strong>{formatPercent(point.tickPercentage)} | {formatAbsolute(point.tickAbsolute)}</strong>
+      </div>
+    </div>
   );
 }
 
@@ -187,6 +230,7 @@ export function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [chartView, setChartView] = useState<ChartView>("smooth");
 
   async function loadTelemetry(mode: Preset, nextFrom: string, nextTo: string, quiet = false): Promise<DashboardPayload | null> {
     if (!nextFrom || !nextTo) return null;
@@ -340,24 +384,92 @@ export function Dashboard() {
   const realtimeMode = preset === "realtime";
   const oneDayMode = preset === "1";
   const trend = data?.trend ?? [];
-  const chartData = trend.map((item) => ({ ...item, label: realtimeMode ? formatTime(item.dataConsulta) : shortDateFormatter.format(new Date(item.dataConsulta)) }));
+  const chartData: ChartPoint[] = trend.map((item, index) => {
+    const previous = trend[index - 1];
+    const tickAbsolute = previous ? item.totalVidasAtivas - previous.totalVidasAtivas : null;
+    return {
+      ...item,
+      label: realtimeMode ? formatTime(item.dataConsulta) : shortDateFormatter.format(new Date(item.dataConsulta)),
+      tickAbsolute,
+      tickPercentage: previous?.totalVidasAtivas ? (tickAbsolute! * 100) / previous.totalVidasAtivas : null
+    };
+  });
   const allChartValues = chartData.flatMap((item) => [item.totalVidasAtivas, item.totalTitularesAtivos, item.totalDependentesAtivos]);
-  const minLives = allChartValues.length ? Math.max(0, Math.floor(Math.min(...allChartValues) / 1000) * 1000) : 0;
+  const rawMin = allChartValues.length ? Math.min(...allChartValues) : 0;
+  const rawMax = allChartValues.length ? Math.max(...allChartValues) : 0;
+  const chartSpread = Math.max(rawMax - rawMin, 1000);
+  const chartStep = chartSpread > 100000 ? 10000 : chartSpread > 20000 ? 5000 : 1000;
+  const chartPadding = chartSpread * 0.08;
+  const chartMin = Math.max(0, Math.floor((rawMin - chartPadding) / chartStep) * chartStep);
+  const chartMax = Math.ceil((rawMax + chartPadding) / chartStep) * chartStep;
+  const lastChartIndex = chartData.length - 1;
+  const lastChartLabel = lastChartIndex >= 0 ? chartData[lastChartIndex].label : null;
+  const sampledEvery = Math.max(1, Math.ceil(chartData.length / 14));
+  const chartCurve = chartView === "smooth" ? "monotone" : "linear";
   const chartDescription = realtimeMode
-    ? "Cada coleta é um tick · a variação compara o tick atual com o imediatamente anterior"
+    ? "Cada coleta é um tick (a cada 5 min) · A variação compara o tick atual com o imediatamente anterior."
     : oneDayMode
       ? "Hoje comparado ao dia anterior · última leitura diária consolidada"
       : "Uma amostra por dia · última leitura diária";
 
   const marketOpen = realtimeMode && trend.length ? trend[0] : null;
   const marketLast = realtimeMode && trend.length ? trend[trend.length - 1] : null;
+  const marketPrevious = realtimeMode && trend.length > 1 ? trend[trend.length - 2] : null;
   const marketHigh = realtimeMode && trend.length ? Math.max(...trend.map((item) => item.totalVidasAtivas)) : null;
   const marketLow = realtimeMode && trend.length ? Math.min(...trend.map((item) => item.totalVidasAtivas)) : null;
   const marketTickGrowth = realtimeMode ? growth?.totalVidasAtivas ?? null : null;
-  const marketDirection = (marketTickGrowth?.percentage ?? 0) > 0 ? "var(--green)" : (marketTickGrowth?.percentage ?? 0) < 0 ? "#ffb4ab" : "var(--text)";
+  const marketDirection = (marketTickGrowth?.percentage ?? 0) > 0 ? "positive" : (marketTickGrowth?.percentage ?? 0) < 0 ? "negative" : "default";
+
+  const sampledDot = (color: string, radius: number) => (props: any) => {
+    const cx = Number(props.cx);
+    const cy = Number(props.cy);
+    const index = Number(props.index ?? 0);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+    const isLast = index === lastChartIndex;
+    const isSampled = chartView === "ticks" && index % sampledEvery === 0;
+    if (!isLast && !isSampled) return null;
+
+    return (
+      <g>
+        {isLast && <circle cx={cx} cy={cy} r={radius + 4} fill={color} opacity={0.13} />}
+        <circle cx={cx} cy={cy} r={isLast ? radius + 1 : radius} fill={color} stroke="var(--chart-surface)" strokeWidth={2} />
+      </g>
+    );
+  };
 
   return (
     <div className="app-shell">
+      <style jsx global>{`
+        .chart-card{padding:0;overflow:hidden;position:relative;background:linear-gradient(180deg,var(--surface-low),var(--surface-lowest));box-shadow:0 18px 46px rgba(0,0,0,.16)}
+        .chart-card::before{content:"";position:absolute;z-index:1;top:0;left:22%;right:22%;height:1px;background:linear-gradient(90deg,transparent,rgba(78,222,163,.48),transparent);pointer-events:none}
+        .chart-card .analytics-heading{margin:0;padding:24px 24px 20px;align-items:center;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(255,255,255,.012),transparent)}
+        .chart-title{gap:10px;flex-wrap:wrap}.chart-title>span:first-child{width:38px;height:38px;display:inline-flex;align-items:center;justify-content:center;border-radius:11px;background:rgba(16,185,129,.09);box-shadow:inset 0 0 0 1px rgba(78,222,163,.14)}
+        .chart-mode-badge{margin-left:2px;padding:4px 7px;border-radius:999px;background:var(--surface-high);color:var(--cyan);font-size:8px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;box-shadow:inset 0 0 0 1px var(--border)}
+        .chart-mode-badge.live{color:var(--green);background:rgba(16,185,129,.09);box-shadow:inset 0 0 0 1px rgba(78,222,163,.18)}
+        .chart-card .analytics-heading p{margin-left:48px;max-width:560px;line-height:1.5}
+        .chart-card .range-switch{background:var(--surface-lowest);border:1px solid var(--border);box-shadow:none}
+        .chart-card .range-switch button.active{background:rgba(16,185,129,.14);color:var(--green);box-shadow:inset 0 0 0 1px rgba(78,222,163,.2)}
+        .chart-card .range-switch button:first-child.active::before{background:var(--green-bright);box-shadow:0 0 0 3px rgba(0,242,155,.08)}
+        .chart-card>.custom-range{margin:16px 24px 0}
+        .market-kpi-grid{padding:20px 24px 16px;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
+        .market-live-card,.market-stat{min-height:92px;padding:13px 14px;display:flex;flex-direction:column;justify-content:space-between;border:1px solid var(--border);border-radius:12px;background:linear-gradient(145deg,var(--surface-card),var(--surface-low));box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}
+        .market-live-card{position:relative;overflow:hidden}.market-live-card::after{content:"";position:absolute;width:68px;height:68px;right:-30px;top:-28px;border-radius:50%;background:rgba(16,185,129,.08);filter:blur(8px)}
+        .market-live-status{display:flex;align-items:center;gap:7px;color:var(--green);font-size:9px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.market-live-status i{position:relative;width:7px;height:7px;border-radius:50%;background:var(--green)}.market-live-status i::after{content:"";position:absolute;inset:-4px;border:1px solid rgba(78,222,163,.35);border-radius:50%;animation:pulse-ring 1.8s ease-out infinite}
+        .market-live-card strong{font-size:12px}.market-live-card small{color:var(--text-faint);font-size:9px;font-variant-numeric:tabular-nums}
+        .market-stat{position:relative;overflow:hidden}.market-stat-label{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--text-faint);font-size:8px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.market-stat-label .material-symbols-outlined{font-size:15px}.market-stat>strong{font-family:"Plus Jakarta Sans",sans-serif;color:var(--text);font-size:18px;line-height:1;font-variant-numeric:tabular-nums}.market-stat>small{color:var(--text-faint);font-size:9px}.market-stat.positive .market-stat-label,.market-stat.positive>strong,.market-stat.positive>small{color:var(--green)}.market-stat.negative .market-stat-label,.market-stat.negative>strong,.market-stat.negative>small{color:#ff8e99}.market-stat.current{box-shadow:inset 0 0 0 1px rgba(78,222,163,.28),inset 0 1px 0 rgba(255,255,255,.02)}.market-stat.current .market-stat-label .material-symbols-outlined{color:var(--green);font-size:10px}
+        .chart-toolbar{padding:12px 24px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,.025);border-bottom:1px solid var(--border)}
+        .chart-card .chart-legend{margin:0;gap:18px}.chart-card .chart-legend span{gap:8px}.chart-card .chart-legend strong{padding:3px 6px;border-radius:5px;background:var(--surface-card);color:var(--text);font-size:9px;font-variant-numeric:tabular-nums;box-shadow:inset 0 0 0 1px var(--border)}
+        .chart-view-control{display:flex;align-items:center;gap:9px;padding:5px 6px 5px 10px;border:1px solid var(--border);border-radius:10px;background:var(--surface-lowest)}.chart-view-control>span{color:var(--text-faint);font-size:9px;font-weight:600}.chart-view-buttons{display:flex;align-items:center;padding:2px;border-radius:8px;background:var(--surface-card)}.chart-view-buttons button{min-height:26px;padding:0 8px;border-radius:6px;cursor:pointer;background:transparent;color:var(--text-faint);font-size:9px;font-weight:700;transition:150ms ease}.chart-view-buttons button.active{background:rgba(16,185,129,.13);color:var(--green);box-shadow:inset 0 0 0 1px rgba(78,222,163,.15)}
+        .chart-card .chart-surface{height:390px;margin:18px 20px 20px;padding:14px 8px 4px;border-color:var(--border);border-radius:13px;background:linear-gradient(180deg,var(--surface-lowest),var(--background));box-shadow:inset 0 14px 34px rgba(0,0,0,.10)}
+        .chart-card .recharts-cartesian-grid-horizontal line{opacity:.72}.chart-card .recharts-line-curve,.chart-card .recharts-area-curve{filter:drop-shadow(0 0 6px rgba(16,185,129,.08))}
+        .analytics-tooltip{min-width:205px;padding:12px;border:1px solid var(--border-strong);border-radius:11px;background:color-mix(in srgb,var(--tooltip) 94%,transparent);box-shadow:0 18px 40px rgba(0,0,0,.48);backdrop-filter:blur(10px)}
+        .analytics-tooltip-header{padding-bottom:8px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;gap:14px;border-bottom:1px solid var(--border)}.analytics-tooltip-header span{display:inline-flex;align-items:center;gap:6px;color:var(--text-muted);font-size:9px;font-weight:700}.analytics-tooltip-header span i{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px rgba(78,222,163,.5)}.analytics-tooltip-header strong{color:var(--cyan);font-size:10px;font-variant-numeric:tabular-nums}.analytics-tooltip dl{margin:0;display:flex;flex-direction:column;gap:6px}.analytics-tooltip dl>div{display:flex;align-items:center;justify-content:space-between;gap:18px}.analytics-tooltip dt,.analytics-tooltip dd{margin:0;font-size:9px}.analytics-tooltip dt{color:var(--text-faint)}.analytics-tooltip dd{font-weight:800;font-variant-numeric:tabular-nums}.analytics-tooltip dd.total{color:var(--green)}.analytics-tooltip dd.dependents{color:var(--blue)}.analytics-tooltip dd.holders{color:var(--cyan)}.analytics-tooltip-delta{padding-top:8px;margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--border);font-size:8px}.analytics-tooltip-delta span{color:var(--text-faint)}.analytics-tooltip-delta strong{color:var(--text-muted);font-variant-numeric:tabular-nums}.analytics-tooltip-delta.positive strong{color:var(--green)}.analytics-tooltip-delta.negative strong{color:#ff8e99}
+        .chart-card .chart-footnote{margin:0;padding:14px 24px;min-height:50px;border-top:1px solid var(--border);background:var(--surface-lowest)}.chart-sync-badge{padding:6px 9px;border-radius:8px;background:var(--surface-card);box-shadow:inset 0 0 0 1px var(--border)}.chart-sync-badge .material-symbols-outlined{animation:spin 8s linear infinite}
+        @media(max-width:1120px){.market-kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+        @media(max-width:860px){.chart-card .analytics-heading{align-items:flex-start}.market-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.chart-card .chart-surface{height:340px}.chart-toolbar{align-items:flex-start;flex-direction:column}.chart-view-control{align-self:stretch;justify-content:space-between}}
+        @media(max-width:640px){.chart-card .analytics-heading{padding:18px 16px}.chart-card .analytics-heading p{margin-left:0}.chart-title>span:first-child{width:34px;height:34px}.market-kpi-grid{padding:16px;gap:8px}.market-live-card,.market-stat{min-height:84px;padding:11px}.market-stat>strong{font-size:16px}.chart-toolbar{padding:11px 16px}.chart-card .chart-surface{height:310px;margin:14px 10px 14px;padding-left:0}.chart-card .chart-footnote{padding:12px 16px}.chart-card>.custom-range{margin-inline:16px}}
+      `}</style>
+
       <header className="app-header">
         <div className="header-inner">
           <div className="header-left">
@@ -417,7 +529,14 @@ export function Dashboard() {
           <section className="analytics-grid" id="historico">
             <article className="analytics-card chart-card">
               <div className="analytics-heading">
-                <div><div className="section-title"><span className="material-symbols-outlined" aria-hidden="true">show_chart</span><h2>Evolução de Vidas Ativas</h2></div><p>{chartDescription}</p></div>
+                <div>
+                  <div className="section-title chart-title">
+                    <span className="material-symbols-outlined" aria-hidden="true">show_chart</span>
+                    <h2>Evolução de Vidas Ativas</h2>
+                    <span className={`chart-mode-badge ${realtimeMode ? "live" : ""}`}>{realtimeMode ? "Intradiário" : "Fechamentos"}</span>
+                  </div>
+                  <p>{chartDescription}</p>
+                </div>
                 <div className="range-switch" aria-label="Período do histórico">
                   {rangeOptions.map(([value, label]) => <button key={value} className={preset === value ? "active" : ""} type="button" onClick={() => changePreset(value)}>{label}</button>)}
                 </div>
@@ -432,33 +551,54 @@ export function Dashboard() {
               )}
 
               {realtimeMode && (
-                <div className="custom-range" style={{ justifyContent: "space-between", alignItems: "stretch", gap: 18 }} aria-label="Ticker realtime">
-                  <span style={{ minWidth: 78, display: "flex", flexDirection: "column", justifyContent: "center", gap: 5 }}>
-                    <small style={{ color: "var(--green)", fontSize: 9, fontWeight: 900, letterSpacing: ".12em", textTransform: "uppercase" }}>● Ao vivo</small>
-                    <strong style={{ fontSize: 11 }}>Sessão de hoje</strong>
-                  </span>
+                <div className="market-kpi-grid" aria-label="Resumo da sessão realtime">
+                  <div className="market-live-card">
+                    <span className="market-live-status"><i /> Ao vivo</span>
+                    <strong>Sessão de hoje</strong>
+                    <small>{marketLast ? `${formatTime(marketLast.dataConsulta)} UTC-3` : "Aguardando tick"}</small>
+                  </div>
                   <MarketStat label="Abertura" value={marketOpen ? numberFormatter.format(marketOpen.totalVidasAtivas) : "—"} hint={marketOpen ? formatTime(marketOpen.dataConsulta) : undefined} />
-                  <MarketStat label="Máxima" value={marketHigh == null ? "—" : numberFormatter.format(marketHigh)} accent="var(--green)" />
-                  <MarketStat label="Mínima" value={marketLow == null ? "—" : numberFormatter.format(marketLow)} accent="#ffb4ab" />
-                  <MarketStat label="Último tick" value={marketLast ? numberFormatter.format(marketLast.totalVidasAtivas) : "—"} hint={marketLast ? formatTime(marketLast.dataConsulta) : undefined} />
-                  <MarketStat label="Δ último tick" value={`${formatPercent(marketTickGrowth?.percentage)} | ${formatAbsolute(marketTickGrowth?.absolute)}`} accent={marketDirection} />
+                  <MarketStat label="Máxima" value={marketHigh == null ? "—" : numberFormatter.format(marketHigh)} hint="Pico da sessão" tone="positive" icon="north" />
+                  <MarketStat label="Mínima" value={marketLow == null ? "—" : numberFormatter.format(marketLow)} hint="Vale registrado" tone="negative" icon="south" />
+                  <MarketStat label="Último tick" value={marketLast ? numberFormatter.format(marketLast.totalVidasAtivas) : "—"} hint={marketLast ? `${formatTime(marketLast.dataConsulta)} (atual)` : undefined} tone="current" icon="circle" />
+                  <MarketStat label="Δ último tick" value={`${formatPercent(marketTickGrowth?.percentage)} | ${formatAbsolute(marketTickGrowth?.absolute)}`} hint={marketPrevious ? `vs. ${formatTime(marketPrevious.dataConsulta)}` : "Aguardando comparação"} tone={marketDirection} />
                 </div>
               )}
 
-              <div className="chart-legend" aria-label="Séries do gráfico"><span><i className="total" />Vidas ativas (Total)</span><span><i className="dependents" />Dependentes ({numberFormatter.format(dependents)})</span><span><i className="holders" />Titulares ({numberFormatter.format(holders)})</span></div>
+              <div className="chart-toolbar">
+                <div className="chart-legend" aria-label="Séries do gráfico">
+                  <span><i className="total" />Vidas ativas (Total)<strong>{numberFormatter.format(totalLives)}</strong></span>
+                  <span><i className="dependents" />Dependentes<strong>{numberFormatter.format(dependents)}</strong></span>
+                  <span><i className="holders" />Titulares<strong>{numberFormatter.format(holders)}</strong></span>
+                </div>
+                <div className="chart-view-control" aria-label="Visualização do gráfico">
+                  <span>Visualização:</span>
+                  <div className="chart-view-buttons">
+                    <button type="button" className={chartView === "smooth" ? "active" : ""} onClick={() => setChartView("smooth")}>Linha suave</button>
+                    <button type="button" className={chartView === "ticks" ? "active" : ""} onClick={() => setChartView("ticks")}>{realtimeMode ? "Ticks amostrados" : "Pontos"}</button>
+                  </div>
+                </div>
+              </div>
 
               <div className="chart-surface">
                 {chartData.length ? (
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={chartData} margin={{ top: 18, right: 20, left: 2, bottom: 0 }}>
+                    <ComposedChart data={chartData} margin={{ top: 18, right: 20, left: 2, bottom: 4 }}>
+                      <defs>
+                        <linearGradient id="totalLivesArea" x1="0" x2="0" y1="0" y2="1">
+                          <stop offset="0%" stopColor="var(--green)" stopOpacity={0.17} />
+                          <stop offset="100%" stopColor="var(--green)" stopOpacity={0.01} />
+                        </linearGradient>
+                      </defs>
                       <CartesianGrid vertical={false} stroke="var(--chart-grid)" strokeDasharray="3 3" />
-                      <XAxis dataKey="label" tick={{ fill: "var(--text-muted)", fontSize: 11 }} tickLine={false} axisLine={{ stroke: "var(--chart-grid-strong)" }} minTickGap={realtimeMode ? 18 : 24} />
-                      <YAxis domain={[minLives, "auto"]} tickFormatter={(value) => numberFormatter.format(value)} tick={{ fill: "var(--text-muted)", fontSize: 11 }} tickLine={false} axisLine={false} width={74} />
-                      <Tooltip contentStyle={{ background: "var(--tooltip)", border: "1px solid var(--border)", borderRadius: 12, boxShadow: "0 14px 30px rgba(0,0,0,.35)" }} labelStyle={{ color: "var(--text)" }} formatter={(value, name) => [numberFormatter.format(Number(value)), name]} />
-                      <Line type={realtimeMode ? "linear" : "monotone"} dataKey="totalVidasAtivas" name="Vidas ativas" stroke="var(--green)" strokeWidth={3.5} dot={{ r: realtimeMode ? 2.5 : 3.5, fill: "var(--chart-surface)", stroke: "var(--green)", strokeWidth: 2 }} activeDot={{ r: 6 }} animationDuration={realtimeMode ? 250 : 700} />
-                      <Line type={realtimeMode ? "linear" : "monotone"} dataKey="totalDependentesAtivos" name="Dependentes" stroke="var(--blue)" strokeWidth={2.2} dot={realtimeMode || oneDayMode ? { r: 3, fill: "var(--chart-surface)", stroke: "var(--blue)", strokeWidth: 2 } : false} animationDuration={realtimeMode ? 250 : 700} />
-                      <Line type={realtimeMode ? "linear" : "monotone"} dataKey="totalTitularesAtivos" name="Titulares" stroke="var(--cyan)" strokeWidth={2.2} dot={realtimeMode || oneDayMode ? { r: 3, fill: "var(--chart-surface)", stroke: "var(--cyan)", strokeWidth: 2 } : false} animationDuration={realtimeMode ? 250 : 700} />
-                    </LineChart>
+                      <XAxis dataKey="label" tick={{ fill: "var(--text-faint)", fontSize: 10 }} tickLine={false} axisLine={false} tickMargin={10} minTickGap={realtimeMode ? 28 : 22} />
+                      <YAxis domain={[chartMin, chartMax]} tickCount={5} tickFormatter={(value) => numberFormatter.format(value)} tick={{ fill: "var(--text-faint)", fontSize: 10 }} tickLine={false} axisLine={false} width={72} tickMargin={7} />
+                      {lastChartLabel && <ReferenceLine x={lastChartLabel} stroke="var(--cyan)" strokeOpacity={0.48} strokeDasharray="4 4" />}
+                      <Tooltip content={<AnalyticsTooltip />} cursor={{ stroke: "var(--cyan)", strokeOpacity: 0.38, strokeDasharray: "4 4" }} />
+                      <Area type={chartCurve} dataKey="totalVidasAtivas" name="Vidas ativas" stroke="var(--green)" strokeWidth={2.8} fill="url(#totalLivesArea)" dot={sampledDot("var(--green)", 2.5)} activeDot={{ r: 5.5, fill: "var(--green)", stroke: "var(--chart-surface)", strokeWidth: 2.5 }} animationDuration={realtimeMode ? 280 : 650} />
+                      <Line type={chartCurve} dataKey="totalDependentesAtivos" name="Dependentes" stroke="var(--blue)" strokeWidth={2.1} dot={sampledDot("var(--blue)", 2.2)} activeDot={{ r: 4.5, fill: "var(--blue)", stroke: "var(--chart-surface)", strokeWidth: 2 }} animationDuration={realtimeMode ? 280 : 650} />
+                      <Line type={chartCurve} dataKey="totalTitularesAtivos" name="Titulares" stroke="var(--cyan)" strokeWidth={2.1} dot={sampledDot("var(--cyan)", 2.2)} activeDot={{ r: 4.5, fill: "var(--cyan)", stroke: "var(--chart-surface)", strokeWidth: 2 }} animationDuration={realtimeMode ? 280 : 650} />
+                    </ComposedChart>
                   </ResponsiveContainer>
                 ) : (
                   <div className="chart-empty"><span className="material-symbols-outlined" aria-hidden="true">monitoring</span><strong>{loading ? "Carregando histórico..." : realtimeMode ? "Aguardando o primeiro tick realtime." : "Ainda não há amostras neste período."}</strong><small>{realtimeMode ? "Cada nova coleta entra automaticamente como um tick da sessão." : "O histórico mantém uma única leitura consolidada por dia."}</small></div>
@@ -467,7 +607,7 @@ export function Dashboard() {
 
               <div className="chart-footnote">
                 <span>{realtimeMode ? "Os ticks são intradiários e temporários. No histórico definitivo fica somente o fechamento: a última leitura de cada dia." : oneDayMode ? "Comparação entre hoje e o fechamento do dia anterior." : "Histórico diário preservando a última leitura de cada data."}</span>
-                <span className="verified"><i className="material-symbols-outlined" aria-hidden="true">verified</i> Sincronização automática</span>
+                <span className="verified chart-sync-badge"><i className="material-symbols-outlined" aria-hidden="true">sync</i>{realtimeMode ? "Sincronização automática ativa (a cada 5m)" : "Fechamentos consolidados"}</span>
               </div>
             </article>
 
