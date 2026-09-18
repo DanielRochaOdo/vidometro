@@ -26,6 +26,11 @@ jobs:
           cache: npm
           cache-dependency-path: package.json
 
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
@@ -37,3 +42,9 @@ jobs:
 
       - name: Validate exported site
         run: test -f out/index.html
+
+      - name: Test LED state logic
+        run: deno test supabase/functions/led-state/logic_test.ts
+
+      - name: Check LED state Edge Function
+        run: deno check supabase/functions/led-state/index.ts
