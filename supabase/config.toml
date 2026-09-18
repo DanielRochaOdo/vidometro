@@ -4,3 +4,8 @@ project_id = "vidometro"
 # Chamadas service-to-service usam a Secret Key no header apikey.
 # A própria função valida essa chave antes de executar a coleta.
 verify_jwt = false
+
+[functions.led-state]
+# O LED Agent usa autenticação própria via Authorization: Bearer <LED_AGENT_TOKEN>.
+# A função valida o token no runtime; o gateway não deve exigir JWT Supabase.
+verify_jwt = false
