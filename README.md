@@ -39,6 +39,42 @@ Cada nova consulta do mesmo dia faz `upsert` sobre essa linha. Portanto, ao fina
 
 A Edge Function também ignora chamadas repetidas dentro de aproximadamente cinco minutos para evitar chamadas excessivas à API Odontoart.
 
+## LED Agent State Endpoint
+
+A Edge Function `led-state` expõe, via HTTPS, somente o estado necessário para um futuro LED Agent Windows. Ela **não consulta a API Odontoart** e **não se comunica diretamente com hardware**.
+
+A fonte é `active_lives_realtime_samples`: a função lê as duas amostras mais recentes, retorna o total de vidas da última leitura e calcula a tendência em relação à leitura imediatamente anterior.
+
+Requisição:
+
+```http
+GET /functions/v1/led-state
+Authorization: Bearer <LED_AGENT_TOKEN>
+```
+
+Resposta:
+
+```json
+{
+  "vidas": 202113,
+  "trend": "up",
+  "version": "12345",
+  "source_updated_at": "2026-09-18T11:20:03.000Z"
+}
+```
+
+`trend` pode ser somente `up`, `down` ou `flat`. A `version` é o `id` da amostra realtime mais recente, por isso permanece estável entre consultas até existir uma nova leitura canônica. `source_updated_at` vem de `consulted_at`, o timestamp da leitura retornada pela origem.
+
+A autenticação usa um segredo exclusivo do agente:
+
+```bash
+supabase secrets set LED_AGENT_TOKEN="SEU_TOKEN_FORTE" --project-ref SEU_PROJECT_REF
+```
+
+Esse token nunca deve usar prefixo `NEXT_PUBLIC_` e nunca deve ser enviado ao frontend. O agente não recebe service role, segredo do collector, credenciais do banco nem token da API Odontoart.
+
+O workflow `.github/workflows/deploy-supabase.yml` já publica todas as Edge Functions quando alterações em `supabase/**` chegam à `main`; não é necessário um workflow separado para `led-state`.
+
 ## 1. Criar o projeto Supabase
 
 Crie um único projeto de produção no Supabase. Guarde:
